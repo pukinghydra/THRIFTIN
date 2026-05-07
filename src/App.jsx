@@ -67,9 +67,9 @@ const S = {
   chip: (active, color) => ({
     padding: "10px 16px", borderRadius: 10,
     background: active ? (color || DARK) : CARD,
-    border: "2px solid " + (active ? (color || DARK) : BORDER),
-    color: active ? "#fff" : "#555",
-    fontSize: 14, fontWeight: active ? 700 : 500,
+    border: "2px solid " + (active ? (color || DARK) : (color || BORDER)),
+    color: active ? "#fff" : (color || "#555"),
+    fontSize: 14, fontWeight: active ? 700 : 600,
     cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
     transition: "all 0.15s",
   }),
@@ -156,8 +156,12 @@ export default function App() {
       </div>
 
       <div style={{ padding: "0 0 80px" }}>
-        {tab === "log" && <LogScreen cats={cats} currentUser={currentUser} onSaved={() => { refresh(); showToast("Sale logged"); }} onCatAdded={refresh} />}
-        {tab === "history" && <HistoryScreen sales={sales} cats={cats} users={users} onChanged={refresh} onCatAdded={refresh} />}
+        <div style={{ display: tab === "log" ? "block" : "none" }}>
+          <LogScreen cats={cats} currentUser={currentUser} onSaved={() => { refresh(); showToast("Sale logged"); }} onCatAdded={refresh} />
+        </div>
+        <div style={{ display: tab === "history" ? "block" : "none" }}>
+          <HistoryScreen sales={sales} cats={cats} users={users} onChanged={refresh} onCatAdded={refresh} />
+        </div>
       </div>
 
       {/* Nav */}
@@ -245,7 +249,10 @@ function AdminPanel({ users, cats, onClose, onChanged }) {
         <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10, marginTop: 28 }}>Categories</div>
         {cats.map(c => (
           <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid " + BORDER }}>
-            <span style={{ fontSize: 14, fontWeight: 600, color: getCatColor(c, cats) }}>{c.name}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ width: 12, height: 12, borderRadius: "50%", background: getCatColor(c, cats), flexShrink: 0 }} />
+              <span style={{ fontSize: 14, fontWeight: 600 }}>{c.name}</span>
+            </div>
             <button onClick={() => removeCat(c.id)} style={{ padding: "5px 12px", background: BG, border: "1px solid #e0d0d0", borderRadius: 8, fontSize: 11, color: "#c33", cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
           </div>
         ))}
@@ -268,8 +275,24 @@ function AdminPanel({ users, cats, onClose, onChanged }) {
 }
 
 function getCatColor(cat, allCats) {
+  if (cat.color) return cat.color;
   const idx = allCats.findIndex(c => c.id === cat.id);
   return CCOLORS[idx % CCOLORS.length];
+}
+
+function DescField({ value, onChange }) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <textarea
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      placeholder={focused ? "" : "Brand, colour, details..."}
+      rows={2}
+      style={{ ...S.field, resize: "none", lineHeight: 1.6 }}
+    />
+  );
 }
 
 // ── Log Screen ────────────────────────────────────────────────────────────────
@@ -313,7 +336,7 @@ function LogScreen({ cats, currentUser, onSaved, onCatAdded }) {
   };
 
   const addCat = async (name, sizeType) => {
-    const c = await api.post("categories", { name, size_type: sizeType });
+    const c = await api.post("categories", { name, size_type: sizeType, color: CCOLORS[Math.floor(Math.random() * CCOLORS.length)] });
     if (c) { await onCatAdded(); setCatId(c.id); setSize(""); setShowAddCat(false); }
   };
 
@@ -338,7 +361,7 @@ function LogScreen({ cats, currentUser, onSaved, onCatAdded }) {
       {/* Description */}
       <div style={S.card}>
         <label style={S.label}>Description</label>
-        <textarea value={comment} onChange={e => setComment(e.target.value)} placeholder="Brand, colour, details..." rows={2} style={{ ...S.field, resize: "none", lineHeight: 1.6 }} />
+        <DescField value={comment} onChange={setComment} />
       </div>
 
       {/* Category */}
@@ -398,9 +421,30 @@ function AddCatStrip({ onAdd, onCancel }) {
   );
 }
 
+function getTimePresets() {
+  const today = new Date();
+  const fmt = d => d.toISOString().slice(0, 10);
+  const daysAgo = n => { const d = new Date(today); d.setDate(d.getDate() - n); return fmt(d); };
+  const startOfWeek = () => { const d = new Date(today); d.setDate(d.getDate() - d.getDay() + 1); return fmt(d); };
+  const startOfLastWeek = () => { const d = new Date(today); d.setDate(d.getDate() - d.getDay() - 6); return fmt(d); };
+  const endOfLastWeek = () => { const d = new Date(today); d.setDate(d.getDate() - d.getDay()); return fmt(d); };
+  const startOfMonth = () => fmt(new Date(today.getFullYear(), today.getMonth(), 1));
+  const startOfLastMonth = () => fmt(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+  const endOfLastMonth = () => fmt(new Date(today.getFullYear(), today.getMonth(), 0));
+  return [
+    { label: "Today", from: fmt(today), to: fmt(today) },
+    { label: "Yesterday", from: daysAgo(1), to: daysAgo(1) },
+    { label: "This week", from: startOfWeek(), to: fmt(today) },
+    { label: "Last week", from: startOfLastWeek(), to: endOfLastWeek() },
+    { label: "This month", from: startOfMonth(), to: fmt(today) },
+    { label: "Last month", from: startOfLastMonth(), to: endOfLastMonth() },
+  ];
+}
+
 // ── History Screen ────────────────────────────────────────────────────────────
 function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
   const [query, setQuery] = useState("");
+  const [filterCat, setFilterCat] = useState("");
   const [filterUser, setFilterUser] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [dateFrom, setDateFrom] = useState("");
@@ -414,6 +458,7 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
       const q = query.toLowerCase();
       if (!(s.comment || "").toLowerCase().includes(q) && !(s.category_name || "").toLowerCase().includes(q) && !(s.user_name || "").toLowerCase().includes(q)) return false;
     }
+    if (filterCat && s.category_id !== filterCat) return false;
     if (filterUser && s.user_id !== filterUser) return false;
     const d = s.sold_at || (s.created_at || "").slice(0, 10);
     if (dateFrom && d < dateFrom) return false;
@@ -455,20 +500,38 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
           </button>
         </div>
 
+        {/* Category filter — always visible */}
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 10, marginBottom: 6 }}>
+          <button onClick={() => setFilterCat("")} style={S.chip(!filterCat, null)}>All</button>
+          {cats.map(c => <button key={c.id} onClick={() => setFilterCat(filterCat === c.id ? "" : c.id)} style={{ ...S.chip(filterCat === c.id, getCatColor(c, cats)), flexShrink: 0 }}>{c.name}</button>)}
+        </div>
+
         {showAdvanced && (
           <div style={{ ...S.card, marginBottom: 12 }}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            {/* Quick time presets */}
+            <div style={{ fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: 1.5, marginBottom: 8 }}>QUICK SELECT</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+              {getTimePresets().map(p => (
+                <button key={p.label} onClick={() => { setDateFrom(p.from); setDateTo(p.to); }} style={{ padding: "7px 12px", background: (dateFrom === p.from && dateTo === p.to) ? DARK : BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 12, fontWeight: 600, color: (dateFrom === p.from && dateTo === p.to) ? "#fff" : "#555", cursor: "pointer", fontFamily: "inherit" }}>{p.label}</button>
+              ))}
+              <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ padding: "7px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 12, color: MUTED, cursor: "pointer", fontFamily: "inherit" }}>Clear</button>
+            </div>
+
+            {/* Custom date range */}
+            <div style={{ fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: 1.5, marginBottom: 8 }}>DATE RANGE</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
               <div style={{ flex: 1 }}>
-                <label style={{ ...S.label, fontSize: 10 }}>From</label>
                 <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ ...S.field, fontSize: 13, padding: "10px 12px" }} />
               </div>
               <div style={{ flex: 1 }}>
-                <label style={{ ...S.label, fontSize: 10 }}>To</label>
                 <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ ...S.field, fontSize: 13, padding: "10px 12px" }} />
               </div>
             </div>
+
+            {/* User filter */}
+            <div style={{ fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: 1.5, marginBottom: 8 }}>STAFF</div>
             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4 }}>
-              <button onClick={() => setFilterUser("")} style={S.chip(!filterUser, null)}>All staff</button>
+              <button onClick={() => setFilterUser("")} style={S.chip(!filterUser, null)}>All</button>
               {users.map(u => (
                 <button key={u.id} onClick={() => setFilterUser(filterUser === u.id ? "" : u.id)} style={{ ...S.chip(filterUser === u.id, u.color), display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
                   <span style={{ width: 8, height: 8, borderRadius: "50%", background: filterUser === u.id ? "#fff" : (u.color || "#888") }} />
@@ -585,7 +648,7 @@ function EditModal({ sale, cats, users, onSave, onClose, onCatAdded }) {
   };
 
   const addCat = async (name, sizeType) => {
-    const c = await api.post("categories", { name, size_type: sizeType });
+    const c = await api.post("categories", { name, size_type: sizeType, color: CCOLORS[Math.floor(Math.random() * CCOLORS.length)] });
     if (c) { await onCatAdded(); setCatId(c.id); setSize(""); setShowAddCat(false); }
   };
 
