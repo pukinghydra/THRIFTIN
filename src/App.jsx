@@ -501,9 +501,9 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
         </div>
 
         {/* Category filter — always visible */}
-        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 10, marginBottom: 6 }}>
-          <button onClick={() => setFilterCat("")} style={S.chip(!filterCat, null)}>All</button>
-          {cats.map(c => <button key={c.id} onClick={() => setFilterCat(filterCat === c.id ? "" : c.id)} style={{ ...S.chip(filterCat === c.id, getCatColor(c, cats)), flexShrink: 0 }}>{c.name}</button>)}
+        <div style={{ display: "flex", gap: 5, overflowX: "auto", paddingBottom: 10, marginBottom: 6 }}>
+          <button onClick={() => setFilterCat("")} style={{ ...S.chip(!filterCat, null), padding: "6px 12px", fontSize: 12, borderRadius: 8 }}>All</button>
+          {cats.map(c => <button key={c.id} onClick={() => setFilterCat(filterCat === c.id ? "" : c.id)} style={{ ...S.chip(filterCat === c.id, getCatColor(c, cats)), padding: "6px 12px", fontSize: 12, borderRadius: 8, flexShrink: 0 }}>{c.name}</button>)}
         </div>
 
         {showAdvanced && (
