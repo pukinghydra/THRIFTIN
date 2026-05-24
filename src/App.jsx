@@ -965,6 +965,14 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
 
   const selectAllDays = () => setSelectedDays(new Set(days));
 
+  // Auto-select all visible days when date filters change in summary mode
+  const dateKey = dateFrom + "|" + dateTo;
+  useEffect(() => {
+    if (summaryMode && days.length > 0) {
+      setSelectedDays(new Set(days));
+    }
+  }, [dateKey, summaryMode]);
+
   const fmtDay = (d) => {
     const today = new Date().toISOString().slice(0, 10);
     const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -1062,6 +1070,20 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
       {/* Summary panel */}
       {summaryMode && summarySales.length > 0 && (
         <SummaryPanel sales={summarySales} cats={cats} onClose={toggleSummaryMode} onFullPage={() => setShowFullSummary(true)} />
+      )}
+
+      {/* Actual items in summary mode */}
+      {summaryMode && summarySales.length > 0 && (
+        <div style={{ margin: "0 16px 12px" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: 1.5, marginBottom: 8, padding: "0 2px" }}>
+            {summaryCatFilter ? `${cats.find(c => c.id === summaryCatFilter)?.name?.toUpperCase() || "ITEMS"} — ` : ""}{summarySales.length} ITEM{summarySales.length !== 1 ? "S" : ""}
+          </div>
+          <div style={{ borderRadius: 14, border: "1px solid " + BORDER, overflow: "hidden" }}>
+            {summarySales.map(s => (
+              <SaleCard key={s.id} sale={s} cats={cats} users={users} onEdit={() => setEditing(s)} onDel={() => setConfirmDel(s)} />
+            ))}
+          </div>
+        </div>
       )}
 
       {summaryMode && selectedDays.size === 0 && (
