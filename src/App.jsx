@@ -900,14 +900,21 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
   const [selectedDays, setSelectedDays] = useState(new Set());
   const [showFullSummary, setShowFullSummary] = useState(false);
   const [summaryCatFilter, setSummaryCatFilter] = useState("");
+  const [showItems, setShowItems] = useState(false);
 
-  const visible = sales.filter(s => {
+  // Base filter: query, category, user (NO date filter)
+  const visibleBase = sales.filter(s => {
     if (query.trim()) {
       const q = query.toLowerCase();
       if (!(s.comment || "").toLowerCase().includes(q) && !(s.category_name || "").toLowerCase().includes(q) && !(s.user_name || "").toLowerCase().includes(q)) return false;
     }
     if (filterCat && s.category_id !== filterCat) return false;
     if (filterUser && s.user_id !== filterUser) return false;
+    return true;
+  });
+
+  // In normal mode, also apply date filter. In summary mode, show ALL days.
+  const visible = summaryMode ? visibleBase : visibleBase.filter(s => {
     const d = s.sold_at || (s.created_at || "").slice(0, 10);
     if (dateFrom && d < dateFrom) return false;
     if (dateTo && d > dateTo) return false;
@@ -924,19 +931,43 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
 
   useEffect(() => { if (days.length && !expandedDay) setExpandedDay(days[0]); }, [days.length]);
 
-  // Summary sales = sales from selected days
+  // Which days fall in the selected date range
+  const daysInDateRange = useMemo(() => {
+    if (!dateFrom && !dateTo) return new Set(days);
+    return new Set(days.filter(d => {
+      if (dateFrom && d < dateFrom) return false;
+      if (dateTo && d > dateTo) return false;
+      return true;
+    }));
+  }, [days, dateFrom, dateTo]);
+
+  // Auto-select days matching date range when presets change in summary mode
+  const dateKey = dateFrom + "|" + dateTo;
+  useEffect(() => {
+    if (summaryMode) {
+      setSelectedDays(new Set(daysInDateRange));
+    }
+  }, [dateKey, summaryMode]);
+
+  // Summary sales = sales from selected days (from full base, not date-filtered)
   const summarySalesRaw = useMemo(() => {
     if (!summaryMode || selectedDays.size === 0) return [];
-    return visible.filter(s => {
+    return visibleBase.filter(s => {
       const d = s.sold_at || (s.created_at || "").slice(0, 10);
       return selectedDays.has(d);
     });
-  }, [summaryMode, selectedDays, visible]);
+  }, [summaryMode, selectedDays, visibleBase]);
 
   const summarySales = useMemo(() => {
     if (!summaryCatFilter) return summarySalesRaw;
     return summarySalesRaw.filter(s => s.category_id === summaryCatFilter);
   }, [summarySalesRaw, summaryCatFilter]);
+
+  // Auto-open items list when category filter is selected, close when cleared
+  useEffect(() => {
+    if (summaryCatFilter) setShowItems(true);
+    else setShowItems(false);
+  }, [summaryCatFilter]);
 
   const toggleDay = (day) => {
     if (!summaryMode) {
@@ -956,22 +987,16 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
       setSummaryMode(false);
       setSelectedDays(new Set());
       setSummaryCatFilter("");
+      setShowItems(false);
     } else {
       setSummaryMode(true);
-      setSelectedDays(new Set());
+      setSelectedDays(new Set(daysInDateRange));
       setSummaryCatFilter("");
+      setShowItems(false);
     }
   };
 
   const selectAllDays = () => setSelectedDays(new Set(days));
-
-  // Auto-select all visible days when date filters change in summary mode
-  const dateKey = dateFrom + "|" + dateTo;
-  useEffect(() => {
-    if (summaryMode && days.length > 0) {
-      setSelectedDays(new Set(days));
-    }
-  }, [dateKey, summaryMode]);
 
   const fmtDay = (d) => {
     const today = new Date().toISOString().slice(0, 10);
@@ -1072,16 +1097,26 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
         <SummaryPanel sales={summarySales} cats={cats} onClose={toggleSummaryMode} onFullPage={() => setShowFullSummary(true)} />
       )}
 
-      {/* Actual items in summary mode */}
+      {/* Actual items in summary mode — toggleable */}
       {summaryMode && summarySales.length > 0 && (
         <div style={{ margin: "0 16px 12px" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: 1.5, marginBottom: 8, padding: "0 2px" }}>
-            {summaryCatFilter ? `${cats.find(c => c.id === summaryCatFilter)?.name?.toUpperCase() || "ITEMS"} — ` : ""}{summarySales.length} ITEM{summarySales.length !== 1 ? "S" : ""}
-          </div>
-          <div style={{ borderRadius: 14, border: "1px solid " + BORDER, overflow: "hidden" }}>
-            {summarySales.map(s => (
-              <SaleCard key={s.id} sale={s} cats={cats} users={users} onEdit={() => setEditing(s)} onDel={() => setConfirmDel(s)} />
-            ))}
+          <button onClick={() => setShowItems(v => !v)} style={{
+            display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center",
+            padding: "10px 14px", background: CARD, border: "1px solid " + BORDER, borderRadius: showItems ? "10px 10px 0 0" : 10,
+            cursor: "pointer", fontFamily: "inherit",
+          }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.2 }}>
+              {summaryCatFilter ? `${cats.find(c => c.id === summaryCatFilter)?.name?.toUpperCase() || "ITEMS"} — ` : ""}{summarySales.length} ITEM{summarySales.length !== 1 ? "S" : ""}
+            </span>
+            <span style={{ fontSize: 12, color: MUTED, fontWeight: 600 }}>{showItems ? "Hide" : "Show"} {"\u203a"}</span>
+          </button>
+          {showItems && (
+            <div style={{ borderRadius: "0 0 14px 14px", border: "1px solid " + BORDER, borderTop: "none", overflow: "hidden" }}>
+              {summarySales.map(s => (
+                <SaleCard key={s.id} sale={s} cats={cats} users={users} onEdit={() => setEditing(s)} onDel={() => setConfirmDel(s)} />
+              ))}
+            </div>
+          )}
           </div>
         </div>
       )}
