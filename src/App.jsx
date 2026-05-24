@@ -604,9 +604,11 @@ function getTimePresets() {
   const today = new Date();
   const fmt = d => d.toISOString().slice(0, 10);
   const daysAgo = n => { const d = new Date(today); d.setDate(d.getDate() - n); return fmt(d); };
-  const startOfWeek = () => { const d = new Date(today); d.setDate(d.getDate() - d.getDay() + 1); return fmt(d); };
-  const startOfLastWeek = () => { const d = new Date(today); d.setDate(d.getDate() - d.getDay() - 6); return fmt(d); };
-  const endOfLastWeek = () => { const d = new Date(today); d.setDate(d.getDate() - d.getDay()); return fmt(d); };
+  // Monday-start weeks: treat Sunday (0) as 7
+  const dow = d => d.getDay() || 7;
+  const startOfWeek = () => { const d = new Date(today); d.setDate(d.getDate() - dow(d) + 1); return fmt(d); };
+  const startOfLastWeek = () => { const d = new Date(today); d.setDate(d.getDate() - dow(d) - 6); return fmt(d); };
+  const endOfLastWeek = () => { const d = new Date(today); d.setDate(d.getDate() - dow(d)); return fmt(d); };
   const startOfMonth = () => fmt(new Date(today.getFullYear(), today.getMonth(), 1));
   const startOfLastMonth = () => fmt(new Date(today.getFullYear(), today.getMonth() - 1, 1));
   const endOfLastMonth = () => fmt(new Date(today.getFullYear(), today.getMonth(), 0));
