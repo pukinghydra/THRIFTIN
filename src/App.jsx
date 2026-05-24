@@ -274,7 +274,7 @@ export default function App() {
       {showAdmin && <AdminPanel users={users} cats={cats} onClose={() => setShowAdmin(false)} onChanged={refresh} />}
 
       <div style={{ padding: "16px 20px 12px", background: CARD, borderBottom: "1px solid " + BORDER, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
-        <div onClick={handleLogoTap} style={{ cursor: "default" }}><Logo size={24} /></div>
+        <div onClick={handleLogoTap} style={{ cursor: "default", display: "flex", alignItems: "baseline", gap: 6 }}><Logo size={24} /><span style={{ fontSize: 9, color: "#ccc" }}>v2</span></div>
         <button onClick={() => setShowPicker(true)} style={{ display: "flex", alignItems: "center", gap: 8, background: BG, border: "1px solid " + BORDER, borderRadius: 24, padding: "6px 14px 6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: "#555" }}>
           <span style={{ width: 12, height: 12, borderRadius: "50%", background: currentUser.color || "#888" }} />
           {currentUser.name}
@@ -1119,7 +1119,6 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
               ))}
             </div>
           )}
-          </div>
         </div>
       )}
 
