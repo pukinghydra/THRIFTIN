@@ -204,6 +204,10 @@ const S = {
 };
 
 // ── Size helpers ──
+function isShirtCat(cat) {
+  // Show sleeve option for "Shirt" categories, but not T-Shirts
+  return !!cat && /shirt/i.test(cat.name || "") && !/t-?shirt/i.test(cat.name || "");
+}
 function getSizeOpts(cat) {
   if (!cat) return { type: "none" };
   switch (cat.size_type) {
@@ -234,6 +238,7 @@ export default function App() {
   const [cats, setCats] = useState([]);
   const [sales, setSales] = useState([]);
   const [inventory, setInventory] = useState([]);
+  const [brands, setBrands] = useState([]);
   const [currentUser, setCU] = useState(null);
   const [tab, setTab] = useState(() => {
     try { return localStorage.getItem("thriftin_tab") || "log"; } catch { return "log"; }
@@ -242,6 +247,7 @@ export default function App() {
   const [showPicker, setShowPicker] = useState(true);
   const [toast, setToast] = useState("");
   const [showAdmin, setShowAdmin] = useState(false);
+  const [adminMode, setAdminMode] = useState(false);
   const logoTaps = useRef(0);
   const logoTimer = useRef(null);
 
@@ -250,8 +256,8 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [u, c, s, inv] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc")]);
-        setUsers(u); setCats(c); setSales(s); setInventory(inv);
+        const [u, c, s, inv, br] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc"), api.get("brands", "&order=name")]);
+        setUsers(u); setCats(c); setSales(s); setInventory(inv); setBrands(br);
         const savedId = localStorage.getItem("thriftin_user");
         if (savedId) { const found = u.find(x => x.id === savedId); if (found) { setCU(found); setShowPicker(false); } }
       } catch {}
@@ -260,8 +266,8 @@ export default function App() {
   }, []);
 
   const refresh = async () => {
-    const [u, c, s, inv] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc")]);
-    setUsers(u); setCats(c); setSales(s); setInventory(inv);
+    const [u, c, s, inv, br] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc"), api.get("brands", "&order=name")]);
+    setUsers(u); setCats(c); setSales(s); setInventory(inv); setBrands(br);
   };
 
   const pickUser = (u) => { setCU(u); setShowPicker(false); try { localStorage.setItem("thriftin_user", u.id); } catch {} };
@@ -270,7 +276,7 @@ export default function App() {
     logoTaps.current++;
     clearTimeout(logoTimer.current);
     logoTimer.current = setTimeout(() => { logoTaps.current = 0; }, 1500);
-    if (logoTaps.current >= 5) { setShowAdmin(true); logoTaps.current = 0; }
+    if (logoTaps.current >= 5) { setAdminMode(true); setShowAdmin(true); logoTaps.current = 0; }
   };
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2200); };
@@ -288,25 +294,28 @@ export default function App() {
   return (
     <div style={S.page}>
       {toast && <Toast msg={toast} />}
-      {showAdmin && <AdminPanel users={users} cats={cats} onClose={() => setShowAdmin(false)} onChanged={refresh} />}
+      {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} />}
 
       <div style={{ padding: "16px 20px 12px", background: CARD, borderBottom: "1px solid " + BORDER, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
         <div onClick={handleLogoTap} style={{ cursor: "default", display: "flex", alignItems: "baseline", gap: 6 }}><Logo size={24} /><span style={{ fontSize: 9, color: "#ccc" }}>v2</span></div>
-        <button onClick={() => setShowPicker(true)} style={{ display: "flex", alignItems: "center", gap: 8, background: BG, border: "1px solid " + BORDER, borderRadius: 24, padding: "6px 14px 6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: "#555" }}>
-          <span style={{ width: 12, height: 12, borderRadius: "50%", background: currentUser.color || "#888" }} />
-          {currentUser.name}
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {adminMode && <button onClick={() => setShowAdmin(true)} style={{ fontSize: 10, fontWeight: 800, color: "#fff", background: "#c33", border: "none", borderRadius: 20, padding: "4px 10px", cursor: "pointer", fontFamily: "inherit", letterSpacing: 0.5 }}>ADMIN</button>}
+          <button onClick={() => setShowPicker(true)} style={{ display: "flex", alignItems: "center", gap: 8, background: BG, border: "1px solid " + BORDER, borderRadius: 24, padding: "6px 14px 6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600, color: "#555" }}>
+            <span style={{ width: 12, height: 12, borderRadius: "50%", background: currentUser.color || "#888" }} />
+            {currentUser.name}
+          </button>
+        </div>
       </div>
 
       <div style={{ padding: "0 0 80px" }}>
         <div style={{ display: tab === "log" ? "block" : "none" }}>
-          <LogScreen cats={cats} currentUser={currentUser} onSaved={() => { refresh(); showToast("Sale logged"); }} onCatAdded={refresh} />
+          <LogScreen cats={cats} brands={brands} currentUser={currentUser} onSaved={() => { refresh(); showToast("Sale logged"); }} onCatAdded={refresh} onBrandAdded={refresh} />
         </div>
         <div style={{ display: tab === "history" ? "block" : "none" }}>
-          <HistoryScreen sales={sales} cats={cats} users={users} onChanged={refresh} onCatAdded={refresh} />
+          <HistoryScreen sales={sales} cats={cats} users={users} adminMode={adminMode} onChanged={refresh} onCatAdded={refresh} />
         </div>
         <div style={{ display: tab === "stock" ? "block" : "none" }}>
-          <StockScreen inventory={inventory} cats={cats} currentUser={currentUser} onChanged={refresh} onCatAdded={refresh} showToast={showToast} />
+          <StockScreen inventory={inventory} cats={cats} brands={brands} currentUser={currentUser} adminMode={adminMode} onChanged={refresh} onCatAdded={refresh} onBrandAdded={refresh} showToast={showToast} />
         </div>
       </div>
 
@@ -364,7 +373,7 @@ function UserPicker({ users, onPick, onAdd }) {
   );
 }
 
-function AdminPanel({ users, cats, onClose, onChanged }) {
+function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged }) {
   const [confirm, setConfirm] = useState(null);
 
   const removeUser = async (id) => { await api.del("users", id); await onChanged(); setConfirm(null); };
@@ -373,9 +382,22 @@ function AdminPanel({ users, cats, onClose, onChanged }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 600, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div style={{ width: "100%", maxWidth: 480, background: CARD, borderRadius: "18px 18px 0 0", maxHeight: "85vh", overflowY: "auto", padding: "24px 20px 40px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <div style={{ fontSize: 18, fontWeight: 800 }}>Admin</div>
           <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 24, color: "#aaa", cursor: "pointer" }}>{"\u00d7"}</button>
+        </div>
+
+        {/* Admin mode toggle */}
+        <div style={{ background: adminMode ? "#FDECEC" : BG, border: "1px solid " + (adminMode ? "#F0C0C0" : BORDER), borderRadius: 12, padding: "14px 16px", marginBottom: 22 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: adminMode ? "#A33" : DARK }}>Admin mode {adminMode ? "ON" : "OFF"}</div>
+              <div style={{ fontSize: 12, color: MUTED, marginTop: 2, lineHeight: 1.4 }}>When on, you can edit photos and permanently delete sales and stock items.</div>
+            </div>
+            <button onClick={onToggleAdmin} style={{ padding: "10px 16px", background: adminMode ? "#c33" : DARK, border: "none", borderRadius: 10, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, marginLeft: 12 }}>
+              {adminMode ? "Turn off" : "Turn on"}
+            </button>
+          </div>
         </div>
 
         <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>Staff members</div>
@@ -432,10 +454,120 @@ function DescField({ value, onChange }) {
       onChange={e => onChange(e.target.value)}
       onFocus={() => setFocused(true)}
       onBlur={() => setFocused(false)}
-      placeholder={focused ? "" : "Brand, colour, details..."}
+      placeholder={focused ? "" : "Colour, details..."}
       rows={2}
       style={{ ...S.field, resize: "none", lineHeight: 1.6 }}
     />
+  );
+}
+
+// ── Fullscreen photo viewer with pinch/double-tap zoom ──
+function PhotoZoom({ url, onClose }) {
+  const [scale, setScale] = useState(1);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const lastDist = useRef(null);
+  const lastPan = useRef(null);
+
+  const onTouchMove = (e) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      if (lastDist.current != null) {
+        const next = Math.min(5, Math.max(1, scale * (dist / lastDist.current)));
+        setScale(next);
+        if (next === 1) setPos({ x: 0, y: 0 });
+      }
+      lastDist.current = dist;
+    } else if (e.touches.length === 1 && scale > 1) {
+      const t = e.touches[0];
+      if (lastPan.current) {
+        setPos(p => ({ x: p.x + (t.clientX - lastPan.current.x), y: p.y + (t.clientY - lastPan.current.y) }));
+      }
+      lastPan.current = { x: t.clientX, y: t.clientY };
+    }
+  };
+  const onTouchEnd = () => { lastDist.current = null; lastPan.current = null; };
+  const onDouble = () => { if (scale > 1) { setScale(1); setPos({ x: 0, y: 0 }); } else setScale(2.5); };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.95)", zIndex: 800, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+      <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 24, color: "#fff", fontSize: 22, width: 44, height: 44, cursor: "pointer", zIndex: 2 }}>{"\u00d7"}</button>
+      <img
+        src={url}
+        alt=""
+        onClick={e => e.stopPropagation()}
+        onDoubleClick={onDouble}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", transform: `translate(${pos.x}px, ${pos.y}px) scale(${scale})`, transition: lastDist.current ? "none" : "transform 0.15s", touchAction: "none" }}
+      />
+      <div style={{ position: "absolute", bottom: 24, left: 0, right: 0, textAlign: "center", color: "rgba(255,255,255,0.6)", fontSize: 12 }}>Double-tap or pinch to zoom</div>
+    </div>
+  );
+}
+
+// ── Brand type-ahead picker ──
+function BrandPicker({ brands, value, onChange, onBrandAdded }) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+
+  // If a brand is selected, show it as a pill with a clear button
+  if (value) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ ...S.chip(true, null), display: "inline-flex", alignItems: "center", gap: 8 }}>
+          {value}
+          <span onClick={() => { onChange(""); setQ(""); }} style={{ cursor: "pointer", fontWeight: 800, fontSize: 16, lineHeight: 1 }}>{"\u00d7"}</span>
+        </span>
+      </div>
+    );
+  }
+
+  const ql = q.trim().toLowerCase();
+  const matches = ql ? brands.filter(b => b.name.toLowerCase().includes(ql)) : brands;
+  const exact = brands.some(b => b.name.toLowerCase() === ql);
+
+  const pick = (name) => { onChange(name); setQ(""); setOpen(false); };
+
+  const addNew = async () => {
+    const name = q.trim();
+    if (!name) return;
+    setAdding(true);
+    try {
+      const b = await api.post("brands", { name });
+      if (b) { await onBrandAdded(); pick(b.name); }
+    } catch (e) {
+      // if it already exists (unique conflict), just pick the typed value
+      pick(name);
+    }
+    setAdding(false);
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        value={q}
+        onChange={e => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder="Type to find brand..."
+        style={S.field}
+      />
+      {open && (
+        <div style={{ marginTop: 8, maxHeight: 200, overflowY: "auto", border: "1px solid " + BORDER, borderRadius: 10, background: CARD }}>
+          {matches.map(b => (
+            <button key={b.id} onClick={() => pick(b.name)} style={{ display: "block", width: "100%", textAlign: "left", padding: "11px 14px", background: "none", border: "none", borderBottom: "1px solid " + BG, fontSize: 14, fontWeight: 600, color: DARK, cursor: "pointer", fontFamily: "inherit" }}>{b.name}</button>
+          ))}
+          {ql && !exact && (
+            <button onClick={addNew} disabled={adding} style={{ display: "block", width: "100%", textAlign: "left", padding: "11px 14px", background: BG, border: "none", fontSize: 14, fontWeight: 700, color: "#06A77D", cursor: "pointer", fontFamily: "inherit" }}>
+              {adding ? "Adding..." : `+ Add "${q.trim()}"`}
+            </button>
+          )}
+          {!matches.length && !ql && <div style={{ padding: "11px 14px", fontSize: 13, color: MUTED }}>Start typing a brand</div>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -490,10 +622,12 @@ function DenimSizePicker({ type, value, onChange, catColor }) {
 }
 
 // ── Log Screen ──
-function LogScreen({ cats, currentUser, onSaved, onCatAdded }) {
+function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdded }) {
   const [photo, setPhoto] = useState(null);
   const [catId, setCatId] = useState("");
   const [size, setSize] = useState("");
+  const [brand, setBrand] = useState("");
+  const [sleeve, setSleeve] = useState("");
   const [comment, setComment] = useState("");
   const [price, setPrice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -521,11 +655,12 @@ function LogScreen({ cats, currentUser, onSaved, onCatAdded }) {
     await api.post("sales", {
       user_id: currentUser.id, user_name: currentUser.name,
       category_id: catId || null, category_name: cat?.name || null,
-      size: size || null, comment: comment.trim() || null,
+      size: size || null, comment: comment.trim() || null, brand: brand || null,
+      sleeve: isShirtCat(cat) ? (sleeve || null) : null,
       price: price ? parseFloat(price) : null, photo_url,
     });
     setBusy(false);
-    setPhoto(null); setCatId(""); setSize(""); setComment(""); setPrice("");
+    setPhoto(null); setCatId(""); setSize(""); setComment(""); setPrice(""); setBrand(""); setSleeve("");
     onSaved();
   };
 
@@ -557,6 +692,11 @@ function LogScreen({ cats, currentUser, onSaved, onCatAdded }) {
       </div>
 
       <div style={S.card}>
+        <label style={S.label}>Brand</label>
+        <BrandPicker brands={brands} value={brand} onChange={setBrand} onBrandAdded={onBrandAdded} />
+      </div>
+
+      <div style={S.card}>
         <label style={S.label}>Category</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {cats.map(c => {
@@ -578,6 +718,17 @@ function LogScreen({ cats, currentUser, onSaved, onCatAdded }) {
               {sizeInfo.opts.map(s => <button key={s} onClick={() => setSize(s)} style={S.chip(size === s, catColor)}>{s}</button>)}
             </div>
           )}
+        </div>
+      )}
+
+      {isShirtCat(cat) && (
+        <div style={S.card}>
+          <label style={S.label}>Sleeve</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[["long", "Long sleeve"], ["short", "Short sleeve"]].map(([k, l]) => (
+              <button key={k} onClick={() => setSleeve(sleeve === k ? "" : k)} style={{ ...S.chip(sleeve === k, null), flex: 1, textAlign: "center" }}>{l}</button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -907,7 +1058,7 @@ function FullSummary({ sales, cats, onClose }) {
 }
 
 // ── History Screen ──
-function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
+function HistoryScreen({ sales, cats, users, adminMode, onChanged, onCatAdded }) {
   const [query, setQuery] = useState("");
   const [filterCat, setFilterCat] = useState("");
   const [filterUser, setFilterUser] = useState("");
@@ -1135,7 +1286,7 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
           {showItems && (
             <div style={{ borderRadius: "0 0 14px 14px", border: "1px solid " + BORDER, borderTop: "none", overflow: "hidden" }}>
               {summarySales.map(s => (
-                <SaleCard key={s.id} sale={s} cats={cats} users={users} onEdit={() => setEditing(s)} onDel={() => setConfirmDel(s)} />
+                <SaleCard key={s.id} sale={s} cats={cats} users={users} adminMode={adminMode} onEdit={() => setEditing(s)} onDel={() => setConfirmDel(s)} />
               ))}
             </div>
           )}
@@ -1187,7 +1338,7 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
               </div>
             </button>
             {open && items.map(s => (
-              <SaleCard key={s.id} sale={s} cats={cats} users={users} onEdit={() => setEditing(s)} onDel={() => setConfirmDel(s)} />
+              <SaleCard key={s.id} sale={s} cats={cats} users={users} adminMode={adminMode} onEdit={() => setEditing(s)} onDel={() => setConfirmDel(s)} />
             ))}
           </div>
         );
@@ -1196,7 +1347,7 @@ function HistoryScreen({ sales, cats, users, onChanged, onCatAdded }) {
   );
 }
 
-function SaleCard({ sale, cats, users, onEdit, onDel }) {
+function SaleCard({ sale, cats, users, adminMode, onEdit, onDel }) {
   const u = users.find(x => x.id === sale.user_id);
   const cat = cats.find(c => c.id === sale.category_id);
   const catColor = cat ? getCatColor(cat, cats) : null;
@@ -1225,10 +1376,12 @@ function SaleCard({ sale, cats, users, onEdit, onDel }) {
           <span style={{ fontSize: 11, color: MUTED }}>{u?.name || sale.user_name || ""}</span>
         </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 5, justifyContent: "center", flexShrink: 0 }}>
-        <button onClick={onEdit} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, fontWeight: 600, color: "#555", cursor: "pointer", fontFamily: "inherit" }}>Edit</button>
-        <button onClick={onDel} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, color: "#bbb", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
-      </div>
+      {adminMode && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 5, justifyContent: "center", flexShrink: 0 }}>
+          <button onClick={onEdit} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, fontWeight: 600, color: "#555", cursor: "pointer", fontFamily: "inherit" }}>Edit</button>
+          <button onClick={onDel} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, color: "#bbb", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1386,7 +1539,7 @@ function BarcodeSVG({ value, height = 90 }) {
 }
 
 // ── Stock Screen ──
-function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, showToast }) {
+function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChanged, onCatAdded, onBrandAdded, showToast }) {
   const [view, setView] = useState("list"); // 'list' | 'add'
   const [statusFilter, setStatusFilter] = useState("in_stock");
   const [search, setSearch] = useState("");
@@ -1396,19 +1549,38 @@ function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, show
   const [queue, setQueue] = useState([]);              // ids queued for batch printing
   const [queueSel, setQueueSel] = useState([]);        // ids selected within the queue to print
   const [detailItem, setDetailItem] = useState(null);
+  const [editItem, setEditItem] = useState(null);
+  const [confirmDelItem, setConfirmDelItem] = useState(null);
+  const [zoomPhoto, setZoomPhoto] = useState("");
+  const [catFilter, setCatFilter] = useState("");
+  const [brandFilter, setBrandFilter] = useState("");
 
   const inStock = inventory.filter(i => i.status === "in_stock");
   const sold = inventory.filter(i => i.status === "sold");
   const queuedItems = queue.map(id => inventory.find(i => i.id === id)).filter(Boolean);
 
-  const shown = (statusFilter === "in_stock" ? inStock : sold).filter(i => {
+  const base = (statusFilter === "in_stock" ? inStock : sold);
+
+  const shown = base.filter(i => {
+    if (catFilter && i.category_id !== catFilter) return false;
+    if (brandFilter && (i.brand || "") !== brandFilter) return false;
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (i.comment || "").toLowerCase().includes(q) ||
            (i.category_name || "").toLowerCase().includes(q) ||
+           (i.brand || "").toLowerCase().includes(q) ||
            (i.barcode || "").toLowerCase().includes(q) ||
            (i.size || "").toLowerCase().includes(q);
   });
+
+  // Brand breakdown within the active category (for the "14 x YSL shirts" view)
+  const brandBreakdown = useMemo(() => {
+    if (!catFilter) return [];
+    const inCat = base.filter(i => i.category_id === catFilter);
+    const counts = {};
+    inCat.forEach(i => { const b = i.brand || "(no brand)"; counts[b] = (counts[b] || 0) + 1; });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [base, catFilter]);
 
   const totalStockValue = inStock.reduce((s, i) => s + (parseFloat(i.sell_price) || 0), 0);
 
@@ -1418,7 +1590,7 @@ function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, show
       const sale = await api.post("sales", {
         user_id: currentUser.id, user_name: currentUser.name,
         category_id: item.category_id, category_name: item.category_name,
-        size: item.size, comment: item.comment, gender: item.gender || null,
+        size: item.size, comment: item.comment, gender: item.gender || null, brand: item.brand || null,
         price: item.sell_price, photo_url: item.photo_url,
       });
       await api.patch("inventory", item.id, {
@@ -1440,6 +1612,29 @@ function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, show
     showToast("Back in stock");
   };
 
+  // Admin: permanently delete an inventory item (and its linked sale if any)
+  const deleteItem = async (item) => {
+    try {
+      if (item.sold_sale_id) { await api.del("sales", item.sold_sale_id); }
+      await api.del("inventory", item.id);
+      await onChanged();
+      showToast("Item deleted");
+    } catch (e) {
+      showToast("Could not delete: " + (e.message || "error"));
+    }
+  };
+
+  // Admin: save edits to an inventory item (incl. photo)
+  const saveItemEdit = async (item, patch) => {
+    try {
+      await api.patch("inventory", item.id, patch);
+      await onChanged();
+      showToast("Item updated");
+    } catch (e) {
+      showToast("Could not update: " + (e.message || "error"));
+    }
+  };
+
   const handleScan = async (code) => {
     // continuous mode: don't close scanner, find + mark sold inline
     const item = inventory.find(i => i.barcode === code);
@@ -1449,7 +1644,7 @@ function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, show
   };
 
   if (view === "add") {
-    return <AddStock cats={cats} currentUser={currentUser} onCatAdded={onCatAdded}
+    return <AddStock cats={cats} brands={brands} currentUser={currentUser} onCatAdded={onCatAdded} onBrandAdded={onBrandAdded}
       onDone={async (newItem, mode) => {
         await onChanged();
         if (mode === "queue") {
@@ -1470,7 +1665,22 @@ function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, show
       {scanning && <ContinuousScanner inventory={inventory} onLookup={handleScan} onSell={markSold} onClose={() => setScanning(false)} />}
       {printItem && <PrintLabel items={[printItem]} onClose={() => setPrintItem(null)} />}
       {printBatch && <PrintLabel items={printBatch} onClose={() => { const ids = printBatch.map(i => i.id); setQueue(q => q.filter(id => !ids.includes(id))); setQueueSel(s => s.filter(id => !ids.includes(id))); setPrintBatch(null); }} />}
-      {detailItem && <StockDetail item={detailItem} cats={cats} onClose={() => setDetailItem(null)} onSold={async () => { await markSold(detailItem); setDetailItem(null); }} onRevert={async () => { await revertSold(detailItem); setDetailItem(null); }} onPrint={() => { setPrintItem(detailItem); setDetailItem(null); }} />}
+      {zoomPhoto && <PhotoZoom url={zoomPhoto} onClose={() => setZoomPhoto("")} />}
+      {detailItem && <StockDetail item={detailItem} cats={cats} adminMode={adminMode} onZoom={(u) => setZoomPhoto(u)} onClose={() => setDetailItem(null)} onSold={async () => { await markSold(detailItem); setDetailItem(null); }} onRevert={async () => { await revertSold(detailItem); setDetailItem(null); }} onPrint={() => { setPrintItem(detailItem); setDetailItem(null); }} onEdit={() => { setEditItem(detailItem); setDetailItem(null); }} onDelete={() => { setConfirmDelItem(detailItem); setDetailItem(null); }} />}
+      {editItem && <EditStock item={editItem} cats={cats} brands={brands} onCatAdded={onCatAdded} onBrandAdded={onBrandAdded} onSave={async (patch) => { await saveItemEdit(editItem, patch); setEditItem(null); }} onClose={() => setEditItem(null)} />}
+      {confirmDelItem && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div style={{ background: CARD, borderRadius: 16, padding: 24, maxWidth: 330 }}>
+            <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>Delete this item permanently?</div>
+            <div style={{ fontSize: 13, color: MUTED, marginBottom: 6, lineHeight: 1.5 }}>{confirmDelItem.comment || confirmDelItem.category_name || confirmDelItem.barcode}</div>
+            <div style={{ fontSize: 12, color: "#c33", marginBottom: 20 }}>This removes it from inventory{confirmDelItem.sold_sale_id ? " and deletes the linked sale from History" : ""}. Cannot be undone.</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setConfirmDelItem(null)} style={{ flex: 1, padding: "13px", background: CARD, border: "2px solid " + BORDER, borderRadius: 10, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+              <button onClick={async () => { await deleteItem(confirmDelItem); setConfirmDelItem(null); }} style={{ flex: 1, padding: "13px", background: "#c33", border: "none", borderRadius: 10, fontSize: 14, color: "#fff", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Action buttons */}
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -1536,34 +1746,60 @@ function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, show
         <button onClick={() => setStatusFilter("sold")} style={{ flex: 1, padding: "8px", background: statusFilter === "sold" ? DARK : CARD, border: "1px solid " + (statusFilter === "sold" ? DARK : BORDER), borderRadius: 8, fontSize: 12, fontWeight: 700, color: statusFilter === "sold" ? "#fff" : "#555", cursor: "pointer", fontFamily: "inherit" }}>Sold ({sold.length})</button>
       </div>
 
+      {/* Category filter chips */}
+      <div style={{ display: "flex", gap: 5, overflowX: "auto", paddingBottom: 8, marginBottom: 6 }}>
+        <button onClick={() => { setCatFilter(""); setBrandFilter(""); }} style={{ ...S.chip(!catFilter, null), padding: "6px 12px", fontSize: 12, borderRadius: 8, flexShrink: 0 }}>All</button>
+        {cats.map(c => {
+          const n = base.filter(i => i.category_id === c.id).length;
+          if (!n) return null;
+          return <button key={c.id} onClick={() => { setCatFilter(catFilter === c.id ? "" : c.id); setBrandFilter(""); }} style={{ ...S.chip(catFilter === c.id, getCatColor(c, cats)), padding: "6px 12px", fontSize: 12, borderRadius: 8, flexShrink: 0 }}>{c.name} {n}</button>;
+        })}
+      </div>
+
+      {/* Brand breakdown within selected category */}
+      {catFilter && brandBreakdown.length > 0 && (
+        <div style={{ background: CARD, border: "1px solid " + BORDER, borderRadius: 12, padding: "12px 14px", marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: 1.2, marginBottom: 8 }}>BRANDS IN {(cats.find(c => c.id === catFilter)?.name || "").toUpperCase()}</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {brandBreakdown.map(([b, n]) => (
+              <button key={b} onClick={() => setBrandFilter(brandFilter === b ? "" : (b === "(no brand)" ? "" : b))} style={{ ...S.chip(brandFilter === b, null), padding: "6px 12px", fontSize: 13, borderRadius: 8 }}>
+                {b} <span style={{ fontWeight: 800 }}>{n}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Search */}
       <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search stock..." style={{ ...S.field, marginBottom: 14 }} />
 
       {/* Items */}
       {!shown.length && <div style={{ textAlign: "center", padding: "50px 0", color: "#bbb", fontSize: 14 }}>No items</div>}
       {shown.map(item => (
-        <StockCard key={item.id} item={item} cats={cats} onClick={() => setDetailItem(item)} />
+        <StockCard key={item.id} item={item} cats={cats} onClick={() => setDetailItem(item)} onZoom={(u) => setZoomPhoto(u)} />
       ))}
       <div style={{ height: 20 }} />
     </div>
   );
 }
 
-function StockCard({ item, cats, onClick }) {
+function StockCard({ item, cats, onClick, onZoom }) {
   const cat = cats.find(c => c.id === item.category_id);
   const catColor = cat ? getCatColor(cat, cats) : null;
   return (
     <div onClick={onClick} style={{ display: "flex", gap: 12, padding: "12px 14px", background: CARD, border: "1px solid " + BORDER, borderRadius: 12, marginBottom: 8, cursor: "pointer" }}>
-      <div style={{ width: 52, height: 66, borderRadius: 8, background: "#f0ede8", overflow: "hidden", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div onClick={(e) => { if (item.photo_url && onZoom) { e.stopPropagation(); onZoom(item.photo_url); } }} style={{ width: 52, height: 66, borderRadius: 8, background: "#f0ede8", overflow: "hidden", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", cursor: item.photo_url ? "zoom-in" : "default" }}>
         {item.photo_url ? <img src={item.photo_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 18, opacity: 0.2 }}>{"\uD83D\uDC55"}</span>}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
+        {item.brand && <div style={{ fontSize: 12, fontWeight: 800, color: DARK, marginBottom: 1 }}>{item.brand}</div>}
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {item.comment || <span style={{ color: "#bbb", fontStyle: "italic", fontWeight: 400 }}>No description</span>}
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
           {item.category_name && <span style={{ fontSize: 11, fontWeight: 700, color: catColor || "#666", background: catColor ? catColor + "18" : "#f4f4f4", padding: "2px 8px", borderRadius: 5 }}>{item.category_name}</span>}
           {item.size && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{item.size}</span>}
+          {item.sleeve && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{item.sleeve === "long" ? "Long sl." : "Short sl."}</span>}
           {item.gender && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{genderLabel(item.gender)}</span>}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -1578,13 +1814,14 @@ function StockCard({ item, cats, onClick }) {
 }
 
 // ── Add Stock form ──
-function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }) {
+function AddStock({ cats, brands, currentUser, onCatAdded, onBrandAdded, onDone, onCancel, showToast }) {
   const [photo, setPhoto] = useState(null);
   const [catId, setCatId] = useState("");
   const [size, setSize] = useState("");
   const [gender, setGender] = useState("");
+  const [brand, setBrand] = useState("");
+  const [sleeve, setSleeve] = useState("");
   const [comment, setComment] = useState("");
-  const [buyPrice, setBuyPrice] = useState("");
   const [sellPrice, setSellPrice] = useState("");
   const [busy, setBusy] = useState(false);
   const [showAddCat, setShowAddCat] = useState(false);
@@ -1602,7 +1839,7 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
   };
 
   const resetForm = (keepCat) => {
-    setPhoto(null); setComment(""); setBuyPrice(""); setSellPrice("");
+    setPhoto(null); setComment(""); setSellPrice(""); setBrand(""); setSleeve("");
     if (!keepCat) { setCatId(""); setSize(""); setGender(""); }
     else { setSize(""); } // keep category (and gender) for next item
   };
@@ -1620,7 +1857,8 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
         category_id: catId || null, category_name: cat?.name || null,
         size: size || null,
         gender: gender || null,
-        buy_price: buyPrice ? parseFloat(buyPrice) : null,
+        brand: brand || null,
+        sleeve: isShirtCat(cat) ? (sleeve || null) : null,
         sell_price: sellPrice ? parseFloat(sellPrice) : null,
         photo_url, status: "in_stock",
         user_id: currentUser.id, user_name: currentUser.name,
@@ -1671,6 +1909,11 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
       </div>
 
       <div style={S.card}>
+        <label style={S.label}>Brand</label>
+        <BrandPicker brands={brands} value={brand} onChange={setBrand} onBrandAdded={onBrandAdded} />
+      </div>
+
+      <div style={S.card}>
         <label style={S.label}>Category</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {cats.map(c => { const cc = getCatColor(c, cats); return <button key={c.id} onClick={() => { setCatId(c.id); setSize(""); setShowAddCat(false); }} style={S.chip(catId === c.id, cc)}>{c.name}</button>; })}
@@ -1692,6 +1935,17 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
         </div>
       )}
 
+      {isShirtCat(cat) && (
+        <div style={S.card}>
+          <label style={S.label}>Sleeve</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[["long", "Long sleeve"], ["short", "Short sleeve"]].map(([k, l]) => (
+              <button key={k} onClick={() => setSleeve(sleeve === k ? "" : k)} style={{ ...S.chip(sleeve === k, null), flex: 1, textAlign: "center" }}>{l}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={S.card}>
         <label style={S.label}>Department</label>
         <div style={{ display: "flex", gap: 8 }}>
@@ -1701,15 +1955,9 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        <div style={{ ...S.card, flex: 1, marginBottom: 0 }}>
-          <label style={S.label}>Buy price</label>
-          <input type="number" inputMode="numeric" value={buyPrice} onChange={e => setBuyPrice(e.target.value)} style={S.field} />
-        </div>
-        <div style={{ ...S.card, flex: 1, marginBottom: 0 }}>
-          <label style={S.label}>Sell price</label>
-          <input type="number" inputMode="numeric" value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={S.field} />
-        </div>
+      <div style={{ ...S.card, marginBottom: 12 }}>
+        <label style={S.label}>Sell price</label>
+        <input type="number" inputMode="numeric" value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={S.field} />
       </div>
 
       {err && (
@@ -1734,7 +1982,7 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
 }
 
 // ── Stock item detail (sold/revert/print) ──
-function StockDetail({ item, cats, onClose, onSold, onRevert, onPrint }) {
+function StockDetail({ item, cats, adminMode, onZoom, onClose, onSold, onRevert, onPrint, onEdit, onDelete }) {
   const cat = cats.find(c => c.id === item.category_id);
   const catColor = cat ? getCatColor(cat, cats) : null;
   const [confirmRevert, setConfirmRevert] = useState(false);
@@ -1748,22 +1996,24 @@ function StockDetail({ item, cats, onClose, onSold, onRevert, onPrint }) {
         </div>
 
         {item.photo_url && (
-          <div style={{ marginBottom: 16, borderRadius: 12, overflow: "hidden", background: "#f0ede8" }}>
+          <div onClick={() => onZoom && onZoom(item.photo_url)} style={{ marginBottom: 16, borderRadius: 12, overflow: "hidden", background: "#f0ede8", cursor: "zoom-in", position: "relative" }}>
             <img src={item.photo_url} alt="" style={{ width: "100%", maxHeight: 320, objectFit: "contain", display: "block" }} />
+            <div style={{ position: "absolute", bottom: 8, right: 8, background: "rgba(0,0,0,0.5)", color: "#fff", borderRadius: 16, padding: "4px 10px", fontSize: 11, fontWeight: 600 }}>Tap to zoom</div>
           </div>
         )}
 
+        {item.brand && <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 2 }}>{item.brand}</div>}
         <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 10 }}>{item.comment || "No description"}</div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
           {item.category_name && <span style={{ fontSize: 12, fontWeight: 700, color: catColor || "#666", background: catColor ? catColor + "18" : "#f4f4f4", padding: "3px 10px", borderRadius: 6 }}>{item.category_name}</span>}
           {item.size && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{item.size}</span>}
+          {item.sleeve && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{item.sleeve === "long" ? "Long sleeve" : "Short sleeve"}</span>}
           {item.gender && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{genderLabel(item.gender)}</span>}
           {item.sell_price && <span style={{ fontSize: 14, fontWeight: 700 }}>{item.sell_price} kr</span>}
         </div>
 
         <div style={{ background: BG, borderRadius: 10, padding: "10px 14px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 13, fontFamily: "monospace", color: "#555" }}>{item.barcode}</span>
-          {item.buy_price && <span style={{ fontSize: 12, color: MUTED }}>Bought: {item.buy_price} kr</span>}
         </div>
         <div style={{ fontSize: 12, color: daysInStock(item) >= 90 && item.status === "in_stock" ? "#c33" : MUTED, marginBottom: 16, fontWeight: daysInStock(item) >= 90 && item.status === "in_stock" ? 700 : 400 }}>
           {item.status === "sold" ? `Sold after ${daysInStock(item)} days in stock` : `${daysInStock(item)} days in stock`}
@@ -1788,6 +2038,144 @@ function StockDetail({ item, cats, onClose, onSold, onRevert, onPrint }) {
             )}
           </>
         )}
+
+        {adminMode && (
+          <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid " + BORDER }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: "#c33", letterSpacing: 1.2, marginBottom: 10 }}>ADMIN</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={onEdit} style={{ flex: 1, padding: "13px", background: CARD, border: "2px solid " + BORDER, borderRadius: 10, fontSize: 13, fontWeight: 700, color: DARK, cursor: "pointer", fontFamily: "inherit" }}>Edit / photo</button>
+              <button onClick={onDelete} style={{ flex: 1, padding: "13px", background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 10, fontSize: 13, fontWeight: 700, color: "#c33", cursor: "pointer", fontFamily: "inherit" }}>Delete</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Edit Stock item (admin): all fields incl. photo ──
+function EditStock({ item, cats, brands, onSave, onClose, onCatAdded, onBrandAdded }) {
+  const [photo, setPhoto] = useState(item.photo_url ? { url: item.photo_url } : null);
+  const [photoChanged, setPC] = useState(false);
+  const [catId, setCatId] = useState(item.category_id || "");
+  const [size, setSize] = useState(item.size || "");
+  const [gender, setGender] = useState(item.gender || "");
+  const [brand, setBrand] = useState(item.brand || "");
+  const [sleeve, setSleeve] = useState(item.sleeve || "");
+  const [comment, setComment] = useState(item.comment || "");
+  const [sellPrice, setSellPrice] = useState(item.sell_price ?? "");
+  const [busy, setBusy] = useState(false);
+  const [showAddCat, setShowAddCat] = useState(false);
+  const [err, setErr] = useState("");
+  const fileRef = useRef();
+
+  const cat = cats.find(c => c.id === catId);
+  const sizeInfo = getSizeOpts(cat);
+  const catColor = cat ? getCatColor(cat, cats) : null;
+
+  const handleFile = async e => {
+    const f = e.target.files?.[0]; if (!f) return;
+    try { const blob = await compressPhoto(f); setPhoto({ blob, preview: URL.createObjectURL(blob) }); setPC(true); } catch {}
+    e.target.value = "";
+  };
+
+  const save = async () => {
+    setBusy(true); setErr("");
+    try {
+      let photo_url = item.photo_url;
+      if (photoChanged) photo_url = photo?.blob ? await api.upload(photo.blob) : null;
+      await onSave({
+        photo_url, category_id: catId || null, category_name: cat?.name || null,
+        size: size || null, gender: gender || null, comment: comment.trim() || null,
+        brand: brand || null,
+        sleeve: isShirtCat(cat) ? (sleeve || null) : null,
+        sell_price: sellPrice !== "" ? parseFloat(sellPrice) : null,
+      });
+    } catch (e) { setBusy(false); setErr(e.message || "Could not save"); }
+  };
+
+  const addCat = async (name, sizeType) => {
+    try {
+      const c = await api.post("categories", { name, size_type: sizeType, color: CCOLORS[Math.floor(Math.random() * CCOLORS.length)] });
+      if (c) { await onCatAdded(); setCatId(c.id); setSize(""); setShowAddCat(false); }
+    } catch (e) { setErr(e.message); }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 550, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div style={{ width: "100%", maxWidth: 480, background: CARD, borderRadius: "18px 18px 0 0", maxHeight: "92vh", overflowY: "auto", padding: "20px 18px 40px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <div style={{ fontSize: 17, fontWeight: 800 }}>Edit item</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 24, color: "#bbb", cursor: "pointer" }}>{"\u00d7"}</button>
+        </div>
+
+        <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
+        {(photo?.url || photo?.preview) ? (
+          <div style={{ position: "relative", marginBottom: 16, borderRadius: 12, overflow: "hidden", background: "#f0ede8" }}>
+            <img src={photo.preview || photo.url} alt="" style={{ width: "100%", maxHeight: 300, objectFit: "contain", display: "block" }} />
+            <div style={{ position: "absolute", top: 10, right: 10, display: "flex", gap: 6 }}>
+              <button onClick={() => fileRef.current?.click()} style={{ background: "rgba(0,0,0,0.6)", border: "none", borderRadius: 20, color: "#fff", padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Replace</button>
+              <button onClick={() => { setPhoto(null); setPC(true); }} style={{ background: "rgba(0,0,0,0.6)", border: "none", borderRadius: 20, color: "#fff", padding: "6px 14px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={() => fileRef.current?.click()} style={{ width: "100%", height: 100, background: BG, border: "2px dashed " + BORDER, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, cursor: "pointer", marginBottom: 16, fontFamily: "inherit", fontSize: 14, color: MUTED }}>{"\uD83D\uDCF7"} Add photo</button>
+        )}
+
+        <label style={S.label}>Description</label>
+        <textarea value={comment} onChange={e => setComment(e.target.value)} rows={2} style={{ ...S.field, resize: "none", lineHeight: 1.6, marginBottom: 14 }} />
+
+        <label style={S.label}>Category</label>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: showAddCat ? 0 : 14 }}>
+          {cats.map(c => <button key={c.id} onClick={() => { setCatId(c.id); setSize(""); setShowAddCat(false); }} style={S.chip(catId === c.id, getCatColor(c, cats))}>{c.name}</button>)}
+          <button onClick={() => setShowAddCat(s => !s)} style={{ ...S.chip(showAddCat), borderStyle: "dashed" }}>+ New</button>
+        </div>
+        {showAddCat && <AddCatStrip onAdd={addCat} onCancel={() => setShowAddCat(false)} />}
+
+        <label style={{ ...S.label, marginTop: 14 }}>Brand</label>
+        <div style={{ marginBottom: 4 }}>
+          <BrandPicker brands={brands} value={brand} onChange={setBrand} onBrandAdded={onBrandAdded} />
+        </div>
+
+        {cat && (
+          <>
+            <label style={{ ...S.label, marginTop: 14 }}>Size</label>
+            {(sizeInfo.type === "denim_full" || sizeInfo.type === "denim_waist") ? (
+              <div style={{ marginBottom: 14 }}><DenimSizePicker type={sizeInfo.type} value={size} onChange={setSize} catColor={catColor} /></div>
+            ) : (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                {sizeInfo.opts.map(s => <button key={s} onClick={() => setSize(s)} style={S.chip(size === s, catColor)}>{s}</button>)}
+              </div>
+            )}
+          </>
+        )}
+
+        {isShirtCat(cat) && (
+          <>
+            <label style={S.label}>Sleeve</label>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              {[["long", "Long sleeve"], ["short", "Short sleeve"]].map(([k, l]) => (
+                <button key={k} onClick={() => setSleeve(sleeve === k ? "" : k)} style={{ ...S.chip(sleeve === k, null), flex: 1, textAlign: "center" }}>{l}</button>
+              ))}
+            </div>
+          </>
+        )}
+
+        <label style={S.label}>Department</label>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {[["mens", "Men's"], ["womens", "Women's"], ["unisex", "Unisex"]].map(([k, l]) => (
+            <button key={k} onClick={() => setGender(gender === k ? "" : k)} style={{ ...S.chip(gender === k, null), flex: 1, textAlign: "center" }}>{l}</button>
+          ))}
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={S.label}>Sell price</label>
+          <input type="number" value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={S.field} />
+        </div>
+
+        {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 12, color: "#A33" }}>{err}</div>}
+
+        <button onClick={save} disabled={busy} style={{ ...S.btn(!busy), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving..." : "Save changes"}</button>
       </div>
     </div>
   );
@@ -1811,17 +2199,23 @@ function PrintLabel({ items, onClose }) {
         if (i > 0) doc.addPage([W, H], "portrait");
         const cx = W / 2;
 
-        // Top text: description (wrapped), then gender·category·size
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(8);
-        const desc = (item.comment || item.category_name || "Item").toString();
-        const descLines = doc.splitTextToSize(desc, W - 4).slice(0, 2);
+        // Top text: brand (bold), description, then category·size
         let y = 4;
+        if (item.brand) {
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(9);
+          doc.text(item.brand.toString(), cx, y, { align: "center" });
+          y += 3.2;
+        }
+        doc.setFont("helvetica", item.brand ? "normal" : "bold");
+        doc.setFontSize(item.brand ? 7 : 8);
+        const desc = (item.comment || item.category_name || "Item").toString();
+        const descLines = doc.splitTextToSize(desc, W - 4).slice(0, item.brand ? 1 : 2);
         descLines.forEach(line => { doc.text(line, cx, y, { align: "center" }); y += 3; });
 
         doc.setFont("helvetica", "normal");
         doc.setFontSize(6);
-        const meta = [genderLabel(item.gender), item.category_name, item.size].filter(Boolean).join("  ·  ");
+        const meta = [item.category_name, item.size].filter(Boolean).join("  ·  ");
         if (meta) { doc.text(meta, cx, y + 0.5, { align: "center" }); }
 
         // QR in the middle
@@ -1864,8 +2258,9 @@ function PrintLabel({ items, onClose }) {
           {list.map((item, idx) => (
             <div key={item.id || idx} style={{ background: "#fff", border: "1px solid " + BORDER, borderRadius: 6, padding: "8px 6px", textAlign: "center", width: 114, minHeight: 150, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <div style={{ fontSize: 10, fontWeight: 700, color: "#000", lineHeight: 1.2 }}>{item.comment || item.category_name || "Item"}</div>
-                <div style={{ fontSize: 8, color: "#444", marginTop: 1 }}>{[genderLabel(item.gender), item.category_name, item.size].filter(Boolean).join(" · ")}</div>
+                {item.brand && <div style={{ fontSize: 11, fontWeight: 800, color: "#000" }}>{item.brand}</div>}
+                <div style={{ fontSize: 10, fontWeight: item.brand ? 500 : 700, color: "#000", lineHeight: 1.2 }}>{item.comment || item.category_name || "Item"}</div>
+                <div style={{ fontSize: 8, color: "#444", marginTop: 1 }}>{[item.category_name, item.size].filter(Boolean).join(" · ")}</div>
               </div>
               <BarcodeSVG value={item.barcode} height={66} />
               <div>
