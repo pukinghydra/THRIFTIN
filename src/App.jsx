@@ -2384,7 +2384,7 @@ function ContinuousScanner({ inventory, onLookup, onSell, onClose }) {
 
         {!pending && (
           <>
-            <input autoFocus value={manual} onChange={e => setManual(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && manual.trim()) { handleCode(manual.trim()); setManual(""); } }} placeholder="Or type / scan code here" style={{ ...S.field, marginBottom: 10 }} />
+            <input value={manual} onChange={e => setManual(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && manual.trim()) { handleCode(manual.trim()); setManual(""); } }} placeholder="Or tap here to type / use Bluetooth scanner" style={{ ...S.field, marginBottom: 10 }} />
             <button onClick={() => { if (manual.trim()) { handleCode(manual.trim()); setManual(""); } }} style={{ width: "100%", padding: "14px", background: "#06A77D", border: "none", borderRadius: 12, fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>Find item</button>
           </>
         )}
