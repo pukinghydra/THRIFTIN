@@ -1376,12 +1376,10 @@ function SaleCard({ sale, cats, users, adminMode, onEdit, onDel }) {
           <span style={{ fontSize: 11, color: MUTED }}>{u?.name || sale.user_name || ""}</span>
         </div>
       </div>
-      {adminMode && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 5, justifyContent: "center", flexShrink: 0 }}>
-          <button onClick={onEdit} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, fontWeight: 600, color: "#555", cursor: "pointer", fontFamily: "inherit" }}>Edit</button>
-          <button onClick={onDel} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, color: "#bbb", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
-        </div>
-      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 5, justifyContent: "center", flexShrink: 0 }}>
+        <button onClick={onEdit} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, fontWeight: 600, color: "#555", cursor: "pointer", fontFamily: "inherit" }}>Edit</button>
+        {adminMode && <button onClick={onDel} style={{ padding: "6px 12px", background: BG, border: "1px solid " + BORDER, borderRadius: 8, fontSize: 11, color: "#bbb", cursor: "pointer", fontFamily: "inherit" }}>Del</button>}
+      </div>
     </div>
   );
 }
@@ -2039,13 +2037,12 @@ function StockDetail({ item, cats, adminMode, onZoom, onClose, onSold, onRevert,
           </>
         )}
 
+        <button onClick={onEdit} style={{ width: "100%", padding: "13px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 14, fontWeight: 700, color: DARK, cursor: "pointer", fontFamily: "inherit", marginTop: 10 }}>Edit / change photo</button>
+
         {adminMode && (
           <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid " + BORDER }}>
             <div style={{ fontSize: 10, fontWeight: 800, color: "#c33", letterSpacing: 1.2, marginBottom: 10 }}>ADMIN</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={onEdit} style={{ flex: 1, padding: "13px", background: CARD, border: "2px solid " + BORDER, borderRadius: 10, fontSize: 13, fontWeight: 700, color: DARK, cursor: "pointer", fontFamily: "inherit" }}>Edit / photo</button>
-              <button onClick={onDelete} style={{ flex: 1, padding: "13px", background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 10, fontSize: 13, fontWeight: 700, color: "#c33", cursor: "pointer", fontFamily: "inherit" }}>Delete</button>
-            </div>
+            <button onClick={onDelete} style={{ width: "100%", padding: "13px", background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 10, fontSize: 13, fontWeight: 700, color: "#c33", cursor: "pointer", fontFamily: "inherit" }}>Delete item</button>
           </div>
         )}
       </div>
