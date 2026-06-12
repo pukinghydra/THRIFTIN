@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import QRCode from "qrcode";
+import { jsPDF } from "jspdf";
 import { BrowserMultiFormatReader } from "@zxing/browser";
 
 const SUPABASE_URL = "https://mpkazwsxjorocqajpkao.supabase.co";
@@ -1795,48 +1796,97 @@ function StockDetail({ item, cats, onClose, onSold, onRevert, onPrint }) {
 // ── Print Label (barcode + description + price) ──
 function PrintLabel({ items, onClose }) {
   const list = Array.isArray(items) ? items : [items];
-  const doPrint = () => { window.print(); };
+  const [building, setBuilding] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [err, setErr] = useState("");
+
+  // Build a PDF: one 38x50mm page per label, size baked in so iOS prints it correctly
+  const buildPdf = async () => {
+    setBuilding(true); setErr("");
+    try {
+      const W = 38, H = 50; // mm
+      const doc = new jsPDF({ unit: "mm", format: [W, H], orientation: "portrait" });
+      for (let i = 0; i < list.length; i++) {
+        const item = list[i];
+        if (i > 0) doc.addPage([W, H], "portrait");
+        const cx = W / 2;
+
+        // Top text: description (wrapped), then gender·category·size
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(8);
+        const desc = (item.comment || item.category_name || "Item").toString();
+        const descLines = doc.splitTextToSize(desc, W - 4).slice(0, 2);
+        let y = 4;
+        descLines.forEach(line => { doc.text(line, cx, y, { align: "center" }); y += 3; });
+
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(6);
+        const meta = [genderLabel(item.gender), item.category_name, item.size].filter(Boolean).join("  ·  ");
+        if (meta) { doc.text(meta, cx, y + 0.5, { align: "center" }); }
+
+        // QR in the middle
+        const qrDataUrl = await QRCode.toDataURL(item.barcode, { margin: 0, width: 300, errorCorrectionLevel: "H" });
+        const qrSize = 22; // mm
+        doc.addImage(qrDataUrl, "PNG", cx - qrSize / 2, 11, qrSize, qrSize);
+
+        // Barcode text + price at bottom
+        doc.setFont("courier", "normal");
+        doc.setFontSize(7);
+        doc.text(item.barcode, cx, 37, { align: "center" });
+        if (item.sell_price != null && item.sell_price !== "") {
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(13);
+          doc.text(item.sell_price + " kr", cx, 45, { align: "center" });
+        }
+      }
+      const blob = doc.output("blob");
+      const url = URL.createObjectURL(blob);
+      setPdfUrl(url);
+      setBuilding(false);
+      // Auto-open the iOS print/share sheet
+      window.open(url, "_blank");
+    } catch (e) {
+      setBuilding(false);
+      setErr(e.message || "Could not build PDF");
+    }
+  };
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <style>{`
-        @media print {
-          @page { size: 38mm 50mm; margin: 0; }
-          html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
-          body * { visibility: hidden; }
-          #print-area, #print-area * { visibility: visible; }
-          #print-area { position: absolute; left: 0; top: 0; width: 38mm; }
-          .print-label { width: 38mm; height: 50mm; page-break-after: always; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 2mm; }
-          .print-label:last-child { page-break-after: auto; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
       <div style={{ background: CARD, borderRadius: 16, padding: 20, maxWidth: 360, width: "100%", maxHeight: "88vh", overflowY: "auto" }}>
-        <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div style={{ fontSize: 16, fontWeight: 800 }}>{list.length > 1 ? `Print ${list.length} labels` : "Print label"}</div>
           <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 22, color: "#bbb", cursor: "pointer" }}>{"\u00d7"}</button>
         </div>
 
-        {/* Print area — all labels, each 38x50mm */}
-        <div id="print-area">
+        {/* On-screen preview (what each label contains) */}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center", marginBottom: 16, maxHeight: 260, overflowY: "auto" }}>
           {list.map((item, idx) => (
-            <div key={item.id || idx} className="print-label" style={{ background: "#fff", border: "1px solid " + BORDER, borderRadius: 8, padding: "10px 12px", textAlign: "center", marginBottom: 12, width: "38mm", minHeight: "50mm", boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
+            <div key={item.id || idx} style={{ background: "#fff", border: "1px solid " + BORDER, borderRadius: 6, padding: "8px 6px", textAlign: "center", width: 114, minHeight: 150, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#000", lineHeight: 1.25, marginBottom: 1, maxHeight: 28, overflow: "hidden" }}>{item.comment || item.category_name || "Item"}</div>
-                <div style={{ fontSize: 9, color: "#444" }}>{[genderLabel(item.gender), item.category_name, item.size].filter(Boolean).join(" \u00b7 ")}</div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#000", lineHeight: 1.2 }}>{item.comment || item.category_name || "Item"}</div>
+                <div style={{ fontSize: 8, color: "#444", marginTop: 1 }}>{[genderLabel(item.gender), item.category_name, item.size].filter(Boolean).join(" · ")}</div>
               </div>
-              <div style={{ display: "flex", justifyContent: "center", margin: "2px 0" }}>
-                <BarcodeSVG value={item.barcode} height={88} />
-              </div>
+              <BarcodeSVG value={item.barcode} height={66} />
               <div>
-                <div style={{ fontSize: 9, fontFamily: "monospace", color: "#000", letterSpacing: 0.5 }}>{item.barcode}</div>
-                {item.sell_price != null && item.sell_price !== "" && <div style={{ fontSize: 17, fontWeight: 800, color: "#000", lineHeight: 1.1 }}>{item.sell_price} kr</div>}
+                <div style={{ fontSize: 8, fontFamily: "monospace", color: "#000" }}>{item.barcode}</div>
+                {item.sell_price != null && item.sell_price !== "" && <div style={{ fontSize: 14, fontWeight: 800, color: "#000" }}>{item.sell_price} kr</div>}
               </div>
             </div>
           ))}
         </div>
 
-        <button className="no-print" onClick={doPrint} style={{ width: "100%", padding: "14px", background: DARK, border: "none", borderRadius: 12, fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit", marginBottom: 8, marginTop: 8 }}>Print {list.length > 1 ? `all ${list.length}` : ""}</button>
-        <div className="no-print" style={{ fontSize: 11, color: MUTED, textAlign: "center", lineHeight: 1.4 }}>In the print dialog set paper to your 38mm (DK-22225) label roll, length 50mm and margins to none. If sizing looks wrong on iPad, that's the known AirPrint issue — tell me and I'll switch on PDF export.</div>
+        {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12, color: "#A33" }}>{err}</div>}
+
+        <button onClick={buildPdf} disabled={building} style={{ width: "100%", padding: "14px", background: DARK, border: "none", borderRadius: 12, fontSize: 14, fontWeight: 700, color: "#fff", cursor: building ? "default" : "pointer", fontFamily: "inherit", marginBottom: 8, opacity: building ? 0.6 : 1 }}>
+          {building ? "Building..." : `Create label PDF${list.length > 1 ? ` (${list.length})` : ""}`}
+        </button>
+        {pdfUrl && (
+          <a href={pdfUrl} target="_blank" rel="noreferrer" style={{ display: "block", textAlign: "center", fontSize: 13, color: "#06A77D", fontWeight: 600, marginBottom: 8 }}>Tap here if the PDF didn't open</a>
+        )}
+        <div style={{ fontSize: 11, color: MUTED, textAlign: "center", lineHeight: 1.4 }}>
+          Opens a 38×50mm PDF. In the iOS print sheet pick the Brother and print — size is fixed in the file, so it prints correct. Set copies = 1.
+        </div>
       </div>
     </div>
   );
