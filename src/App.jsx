@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import QRCode from "qrcode";
+import { BrowserMultiFormatReader } from "@zxing/browser";
 
 const SUPABASE_URL = "https://mpkazwsxjorocqajpkao.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1wa2F6d3N4am9yb2NxYWpwa2FvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwNzA4MTksImV4cCI6MjA5MzY0NjgxOX0.IZjuxlv40iOLEdOXJrYl1QfRKmo_nMYJZEH4FHU5ZiI";
@@ -159,6 +161,19 @@ const api = {
     const r = await fetch(sb.sto + "/photos/" + fn, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY, "Content-Type": "image/jpeg" }, body: blob });
     return r.ok ? SUPABASE_URL + "/storage/v1/object/public/photos/" + fn : null;
   },
+  // Generate next unique barcode by counting existing inventory rows + finding max
+  nextBarcode: async () => {
+    const r = await fetch(sb.url + "/inventory?select=barcode&order=barcode.desc&limit=1", { headers: sb.h });
+    let next = 1;
+    if (r.ok) {
+      const rows = await r.json();
+      if (rows.length && rows[0].barcode) {
+        const m = rows[0].barcode.match(/THR-(\d+)/);
+        if (m) next = parseInt(m[1], 10) + 1;
+      }
+    }
+    return "THR-" + String(next).padStart(6, "0");
+  },
 };
 
 const S = {
@@ -217,6 +232,7 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [cats, setCats] = useState([]);
   const [sales, setSales] = useState([]);
+  const [inventory, setInventory] = useState([]);
   const [currentUser, setCU] = useState(null);
   const [tab, setTab] = useState(() => {
     try { return localStorage.getItem("thriftin_tab") || "log"; } catch { return "log"; }
@@ -233,8 +249,8 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [u, c, s] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc")]);
-        setUsers(u); setCats(c); setSales(s);
+        const [u, c, s, inv] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc")]);
+        setUsers(u); setCats(c); setSales(s); setInventory(inv);
         const savedId = localStorage.getItem("thriftin_user");
         if (savedId) { const found = u.find(x => x.id === savedId); if (found) { setCU(found); setShowPicker(false); } }
       } catch {}
@@ -243,8 +259,8 @@ export default function App() {
   }, []);
 
   const refresh = async () => {
-    const [u, c, s] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc")]);
-    setUsers(u); setCats(c); setSales(s);
+    const [u, c, s, inv] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc")]);
+    setUsers(u); setCats(c); setSales(s); setInventory(inv);
   };
 
   const pickUser = (u) => { setCU(u); setShowPicker(false); try { localStorage.setItem("thriftin_user", u.id); } catch {} };
@@ -288,10 +304,13 @@ export default function App() {
         <div style={{ display: tab === "history" ? "block" : "none" }}>
           <HistoryScreen sales={sales} cats={cats} users={users} onChanged={refresh} onCatAdded={refresh} />
         </div>
+        <div style={{ display: tab === "stock" ? "block" : "none" }}>
+          <StockScreen inventory={inventory} cats={cats} currentUser={currentUser} onChanged={refresh} onCatAdded={refresh} showToast={showToast} />
+        </div>
       </div>
 
       <nav style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: CARD, borderTop: "1px solid " + BORDER, display: "flex", zIndex: 100, paddingBottom: "env(safe-area-inset-bottom)" }}>
-        {[["log", "Log sale", "\uD83D\uDCF7"], ["history", "History", "\uD83D\uDDC2"]].map(([id, lbl, icon]) => (
+        {[["log", "Log sale", "\uD83D\uDCF7"], ["stock", "Stock", "\uD83C\uDFF7\uFE0F"], ["history", "History", "\uD83D\uDDC2"]].map(([id, lbl, icon]) => (
           <button key={id} onClick={() => setTab(id)} style={{ flex: 1, padding: "11px 0 9px", background: "none", border: "none", borderTop: "3px solid " + (tab === id ? DARK : "transparent"), color: tab === id ? DARK : "#bbb", cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>
             <div style={{ fontSize: 20, marginBottom: 2 }}>{icon}</div>{lbl}
           </button>
@@ -1343,6 +1362,554 @@ function ConfirmDel({ sale, onYes, onNo }) {
         <div style={{ fontSize: 13, color: MUTED, marginBottom: 24, lineHeight: 1.5 }}>{sale.comment || sale.category_name || "Untitled"}</div>
         <button onClick={onYes} style={{ width: "100%", padding: "14px", background: "#c33", border: "none", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", marginBottom: 8 }}>Delete</button>
         <button onClick={onNo} style={{ width: "100%", padding: "14px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 14, color: "#666", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════
+// INVENTORY / STOCK SYSTEM
+// ══════════════════════════════════════════
+
+// ── QR code generator (uses qrcode lib) ──
+
+function BarcodeSVG({ value, height = 90 }) {
+  const [dataUrl, setDataUrl] = useState("");
+  useEffect(() => {
+    QRCode.toDataURL(value, { margin: 1, width: 320, errorCorrectionLevel: "H" })
+      .then(setDataUrl)
+      .catch(() => setDataUrl(""));
+  }, [value]);
+  if (!dataUrl) return <div style={{ width: height, height, background: "#f0f0f0" }} />;
+  return <img src={dataUrl} alt={value} width={height} height={height} style={{ display: "block" }} />;
+}
+
+// ── Stock Screen ──
+function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, showToast }) {
+  const [view, setView] = useState("list"); // 'list' | 'add'
+  const [statusFilter, setStatusFilter] = useState("in_stock");
+  const [search, setSearch] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [printItem, setPrintItem] = useState(null);   // single item to print
+  const [printBatch, setPrintBatch] = useState(null);  // array of items to print
+  const [queue, setQueue] = useState([]);              // ids queued for batch printing
+  const [queueSel, setQueueSel] = useState([]);        // ids selected within the queue to print
+  const [detailItem, setDetailItem] = useState(null);
+
+  const inStock = inventory.filter(i => i.status === "in_stock");
+  const sold = inventory.filter(i => i.status === "sold");
+  const queuedItems = queue.map(id => inventory.find(i => i.id === id)).filter(Boolean);
+
+  const shown = (statusFilter === "in_stock" ? inStock : sold).filter(i => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (i.comment || "").toLowerCase().includes(q) ||
+           (i.category_name || "").toLowerCase().includes(q) ||
+           (i.barcode || "").toLowerCase().includes(q) ||
+           (i.size || "").toLowerCase().includes(q);
+  });
+
+  const totalStockValue = inStock.reduce((s, i) => s + (parseFloat(i.sell_price) || 0), 0);
+
+  // Mark as sold: also creates a sale entry so it flows into History
+  const markSold = async (item) => {
+    const sale = await api.post("sales", {
+      user_id: currentUser.id, user_name: currentUser.name,
+      category_id: item.category_id, category_name: item.category_name,
+      size: item.size, comment: item.comment,
+      price: item.sell_price, photo_url: item.photo_url,
+    });
+    await api.patch("inventory", item.id, {
+      status: "sold", sold_at: new Date().toISOString(),
+      sold_sale_id: sale?.id || null,
+    });
+    await onChanged();
+    showToast("Marked sold");
+  };
+
+  // Revert sold → in_stock, and remove the linked sale entry
+  const revertSold = async (item) => {
+    if (item.sold_sale_id) { await api.del("sales", item.sold_sale_id); }
+    await api.patch("inventory", item.id, { status: "in_stock", sold_at: null, sold_sale_id: null });
+    await onChanged();
+    showToast("Back in stock");
+  };
+
+  const handleScan = async (code) => {
+    // continuous mode: don't close scanner, find + mark sold inline
+    const item = inventory.find(i => i.barcode === code);
+    if (!item) { showToast("Not found: " + code); return null; }
+    if (item.status === "sold") { showToast("Already sold: " + (item.comment || item.barcode)); return item; }
+    return item;
+  };
+
+  if (view === "add") {
+    return <AddStock cats={cats} currentUser={currentUser} onCatAdded={onCatAdded}
+      onDone={async (newItem, mode) => {
+        await onChanged();
+        if (mode === "queue") {
+          if (newItem) { setQueue(q => [...q, newItem.id]); setQueueSel(s => [...s, newItem.id]); }
+          // stay in add view for next item (AddStock resets its own form)
+        } else if (mode === "print") {
+          setView("list");
+          if (newItem) setPrintItem(newItem);
+        } else {
+          setView("list");
+        }
+      }}
+      onCancel={() => setView("list")} showToast={showToast} />;
+  }
+
+  return (
+    <div style={{ padding: "16px 16px 0" }}>
+      {scanning && <ContinuousScanner inventory={inventory} onLookup={handleScan} onSell={markSold} onClose={() => setScanning(false)} />}
+      {printItem && <PrintLabel items={[printItem]} onClose={() => setPrintItem(null)} />}
+      {printBatch && <PrintLabel items={printBatch} onClose={() => { const ids = printBatch.map(i => i.id); setQueue(q => q.filter(id => !ids.includes(id))); setQueueSel(s => s.filter(id => !ids.includes(id))); setPrintBatch(null); }} />}
+      {detailItem && <StockDetail item={detailItem} cats={cats} onClose={() => setDetailItem(null)} onSold={async () => { await markSold(detailItem); setDetailItem(null); }} onRevert={async () => { await revertSold(detailItem); setDetailItem(null); }} onPrint={() => { setPrintItem(detailItem); setDetailItem(null); }} />}
+
+      {/* Action buttons */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <button onClick={() => setView("add")} style={{ flex: 1, padding: "14px", background: DARK, border: "none", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>+ Add item</button>
+        <button onClick={() => setScanning(true)} style={{ flex: 1, padding: "14px", background: "#06A77D", border: "none", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{"\uD83D\uDCF7"} Scan</button>
+      </div>
+
+      {/* Print queue tray */}
+      {queuedItems.length > 0 && (
+        <div style={{ background: "#FFF8EC", border: "1px solid #F0D9A8", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#8A6D3B" }}>Print queue · {queueSel.length}/{queuedItems.length} selected</div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setQueueSel(queuedItems.map(i => i.id))} style={{ background: "none", border: "none", fontSize: 12, color: "#A98B5B", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>All</button>
+              <button onClick={() => setQueueSel([])} style={{ background: "none", border: "none", fontSize: 12, color: "#A98B5B", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>None</button>
+              <button onClick={() => { setQueue([]); setQueueSel([]); }} style={{ background: "none", border: "none", fontSize: 12, color: "#A98B5B", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>Clear</button>
+            </div>
+          </div>
+
+          {/* Selectable queued items */}
+          <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 10 }}>
+            {queuedItems.map(item => {
+              const sel = queueSel.includes(item.id);
+              return (
+                <div key={item.id} onClick={() => setQueueSel(s => sel ? s.filter(x => x !== item.id) : [...s, item.id])} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 6px", borderBottom: "1px solid #F0E4C8", cursor: "pointer" }}>
+                  <span style={{ width: 20, height: 20, borderRadius: 5, flexShrink: 0, border: sel ? "none" : "2px solid #D8C49A", background: sel ? "#E8973A" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 12, fontWeight: 800 }}>{sel ? "\u2713" : ""}</span>
+                  <div style={{ width: 30, height: 38, borderRadius: 5, background: "#f0ede8", overflow: "hidden", flexShrink: 0 }}>
+                    {item.photo_url ? <img src={item.photo_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : null}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#5C4A2A", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.comment || item.category_name || "Item"}</div>
+                    <div style={{ fontSize: 10, color: "#A98B5B", fontFamily: "monospace" }}>{item.barcode}{item.size ? " · " + item.size : ""}{item.sell_price ? " · " + item.sell_price + " kr" : ""}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <button
+            onClick={() => { const sel = queuedItems.filter(i => queueSel.includes(i.id)); if (sel.length) setPrintBatch(sel); }}
+            disabled={queueSel.length === 0}
+            style={{ width: "100%", padding: "12px", background: queueSel.length ? "#E8973A" : "#E8D5B0", border: "none", borderRadius: 10, color: "#fff", fontSize: 14, fontWeight: 700, cursor: queueSel.length ? "pointer" : "default", fontFamily: "inherit" }}>
+            {"\uD83D\uDDA8\uFE0F"} Print {queueSel.length} selected label{queueSel.length !== 1 ? "s" : ""}
+          </button>
+        </div>
+      )}
+
+      {/* Stats */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <div style={{ flex: 1, background: CARD, borderRadius: 12, border: "1px solid " + BORDER, padding: "10px 14px" }}>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>{inStock.length}</div>
+          <div style={{ fontSize: 11, color: MUTED, fontWeight: 600 }}>in stock</div>
+        </div>
+        <div style={{ flex: 1, background: CARD, borderRadius: 12, border: "1px solid " + BORDER, padding: "10px 14px" }}>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>{totalStockValue.toLocaleString("sv-SE")}</div>
+          <div style={{ fontSize: 11, color: MUTED, fontWeight: 600 }}>kr value</div>
+        </div>
+      </div>
+
+      {/* Status tabs */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <button onClick={() => setStatusFilter("in_stock")} style={{ flex: 1, padding: "8px", background: statusFilter === "in_stock" ? DARK : CARD, border: "1px solid " + (statusFilter === "in_stock" ? DARK : BORDER), borderRadius: 8, fontSize: 12, fontWeight: 700, color: statusFilter === "in_stock" ? "#fff" : "#555", cursor: "pointer", fontFamily: "inherit" }}>In stock ({inStock.length})</button>
+        <button onClick={() => setStatusFilter("sold")} style={{ flex: 1, padding: "8px", background: statusFilter === "sold" ? DARK : CARD, border: "1px solid " + (statusFilter === "sold" ? DARK : BORDER), borderRadius: 8, fontSize: 12, fontWeight: 700, color: statusFilter === "sold" ? "#fff" : "#555", cursor: "pointer", fontFamily: "inherit" }}>Sold ({sold.length})</button>
+      </div>
+
+      {/* Search */}
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search stock..." style={{ ...S.field, marginBottom: 14 }} />
+
+      {/* Items */}
+      {!shown.length && <div style={{ textAlign: "center", padding: "50px 0", color: "#bbb", fontSize: 14 }}>No items</div>}
+      {shown.map(item => (
+        <StockCard key={item.id} item={item} cats={cats} onClick={() => setDetailItem(item)} />
+      ))}
+      <div style={{ height: 20 }} />
+    </div>
+  );
+}
+
+function StockCard({ item, cats, onClick }) {
+  const cat = cats.find(c => c.id === item.category_id);
+  const catColor = cat ? getCatColor(cat, cats) : null;
+  return (
+    <div onClick={onClick} style={{ display: "flex", gap: 12, padding: "12px 14px", background: CARD, border: "1px solid " + BORDER, borderRadius: 12, marginBottom: 8, cursor: "pointer" }}>
+      <div style={{ width: 52, height: 66, borderRadius: 8, background: "#f0ede8", overflow: "hidden", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {item.photo_url ? <img src={item.photo_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 18, opacity: 0.2 }}>{"\uD83D\uDC55"}</span>}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {item.comment || <span style={{ color: "#bbb", fontStyle: "italic", fontWeight: 400 }}>No description</span>}
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+          {item.category_name && <span style={{ fontSize: 11, fontWeight: 700, color: catColor || "#666", background: catColor ? catColor + "18" : "#f4f4f4", padding: "2px 8px", borderRadius: 5 }}>{item.category_name}</span>}
+          {item.size && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{item.size}</span>}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 10, color: MUTED, fontFamily: "monospace" }}>{item.barcode}</span>
+          {item.sell_price && <span style={{ fontSize: 13, fontWeight: 700, color: "#444" }}>{item.sell_price} kr</span>}
+          {item.status === "in_stock" && <span style={{ fontSize: 10, color: daysInStock(item) >= 90 ? "#c33" : MUTED, fontWeight: daysInStock(item) >= 90 ? 700 : 400 }}>{daysInStock(item)}d in stock</span>}
+        </div>
+      </div>
+      {item.status === "sold" && <div style={{ alignSelf: "center", fontSize: 10, fontWeight: 700, color: "#c33", background: "#fdecec", padding: "3px 8px", borderRadius: 5 }}>SOLD</div>}
+    </div>
+  );
+}
+
+// ── Add Stock form ──
+function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }) {
+  const [photo, setPhoto] = useState(null);
+  const [catId, setCatId] = useState("");
+  const [size, setSize] = useState("");
+  const [comment, setComment] = useState("");
+  const [buyPrice, setBuyPrice] = useState("");
+  const [sellPrice, setSellPrice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showAddCat, setShowAddCat] = useState(false);
+  const fileRef = useRef();
+
+  const cat = cats.find(c => c.id === catId);
+  const sizeInfo = getSizeOpts(cat);
+  const catColor = cat ? getCatColor(cat, cats) : null;
+
+  const handleFile = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    try { const blob = await compressPhoto(f); setPhoto({ blob, preview: URL.createObjectURL(blob) }); } catch {}
+    e.target.value = "";
+  };
+
+  const resetForm = (keepCat) => {
+    setPhoto(null); setComment(""); setBuyPrice(""); setSellPrice("");
+    if (!keepCat) { setCatId(""); setSize(""); }
+    else { setSize(""); } // keep category, clear size for next item
+  };
+
+  const save = async (mode) => {
+    if (busy) return;
+    setBusy(true);
+    let photo_url = null;
+    if (photo) photo_url = await api.upload(photo.blob);
+    const barcode = await api.nextBarcode();
+    const item = await api.post("inventory", {
+      barcode, comment: comment.trim() || null,
+      category_id: catId || null, category_name: cat?.name || null,
+      size: size || null,
+      buy_price: buyPrice ? parseFloat(buyPrice) : null,
+      sell_price: sellPrice ? parseFloat(sellPrice) : null,
+      photo_url, status: "in_stock",
+      user_id: currentUser.id, user_name: currentUser.name,
+      added_at: new Date().toISOString(),
+    });
+    setBusy(false);
+    if (mode === "queue") {
+      resetForm(true); // keep category for fast haul entry
+      showToast("Added + queued \u2192 next item");
+    }
+    onDone(item, mode);
+  };
+
+  const addCat = async (name, sizeType) => {
+    const c = await api.post("categories", { name, size_type: sizeType, color: CCOLORS[Math.floor(Math.random() * CCOLORS.length)] });
+    if (c) { await onCatAdded(); setCatId(c.id); setSize(""); setShowAddCat(false); }
+  };
+
+  return (
+    <div style={{ padding: "16px 16px 0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ fontSize: 18, fontWeight: 800 }}>Add to stock</div>
+        <button onClick={onCancel} style={{ background: "none", border: "none", fontSize: 24, color: "#bbb", cursor: "pointer" }}>{"\u00d7"}</button>
+      </div>
+
+      <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
+      {photo ? (
+        <div style={{ position: "relative", marginBottom: 14, borderRadius: 14, overflow: "hidden", background: "#f0ede8", border: "1px solid " + BORDER }}>
+          <img src={photo.preview} alt="" style={{ width: "100%", maxHeight: 360, objectFit: "contain", display: "block" }} />
+          <button onClick={() => setPhoto(null)} style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.6)", color: "#fff", border: "none", borderRadius: 24, padding: "7px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
+        </div>
+      ) : (
+        <button onClick={() => fileRef.current?.click()} style={{ width: "100%", aspectRatio: "3/4", maxHeight: 300, background: CARD, border: "2px dashed " + BORDER, borderRadius: 14, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", marginBottom: 14 }}>
+          <div style={{ fontSize: 40, marginBottom: 8, opacity: 0.4 }}>{"\uD83D\uDCF7"}</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: "#888" }}>Add photo</div>
+        </button>
+      )}
+
+      <div style={S.card}>
+        <label style={S.label}>Description</label>
+        <DescField value={comment} onChange={setComment} />
+      </div>
+
+      <div style={S.card}>
+        <label style={S.label}>Category</label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {cats.map(c => { const cc = getCatColor(c, cats); return <button key={c.id} onClick={() => { setCatId(c.id); setSize(""); setShowAddCat(false); }} style={S.chip(catId === c.id, cc)}>{c.name}</button>; })}
+          <button onClick={() => setShowAddCat(s => !s)} style={{ ...S.chip(showAddCat, null), borderStyle: "dashed" }}>+ New</button>
+        </div>
+        {showAddCat && <AddCatStrip onAdd={addCat} onCancel={() => setShowAddCat(false)} />}
+      </div>
+
+      {cat && (
+        <div style={S.card}>
+          <label style={S.label}>Size</label>
+          {(sizeInfo.type === "denim_full" || sizeInfo.type === "denim_waist") ? (
+            <DenimSizePicker type={sizeInfo.type} value={size} onChange={setSize} catColor={catColor} />
+          ) : (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {sizeInfo.opts.map(s => <button key={s} onClick={() => setSize(s)} style={S.chip(size === s, catColor)}>{s}</button>)}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <div style={{ ...S.card, flex: 1, marginBottom: 0 }}>
+          <label style={S.label}>Buy price</label>
+          <input type="number" inputMode="numeric" value={buyPrice} onChange={e => setBuyPrice(e.target.value)} style={S.field} />
+        </div>
+        <div style={{ ...S.card, flex: 1, marginBottom: 0 }}>
+          <label style={S.label}>Sell price</label>
+          <input type="number" inputMode="numeric" value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={S.field} />
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <button onClick={() => save("queue")} disabled={busy} style={{ flex: 1, padding: "16px", background: "#E8973A", border: "none", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>
+          {busy ? "..." : "Add + queue label"}
+        </button>
+        <button onClick={() => save("print")} disabled={busy} style={{ flex: 1, padding: "16px", background: DARK, border: "none", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>
+          {busy ? "..." : "Add + print now"}
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: MUTED, textAlign: "center", marginBottom: 16, lineHeight: 1.4 }}>
+        Queue = keep adding (category stays), print all at the end. Print now = print this one label immediately.
+      </div>
+    </div>
+  );
+}
+
+// ── Stock item detail (sold/revert/print) ──
+function StockDetail({ item, cats, onClose, onSold, onRevert, onPrint }) {
+  const cat = cats.find(c => c.id === item.category_id);
+  const catColor = cat ? getCatColor(cat, cats) : null;
+  const [confirmRevert, setConfirmRevert] = useState(false);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 500, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div style={{ width: "100%", maxWidth: 480, background: CARD, borderRadius: "18px 18px 0 0", maxHeight: "92vh", overflowY: "auto", padding: "20px 18px 40px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontSize: 17, fontWeight: 800 }}>{item.status === "sold" ? "Sold item" : "In stock"}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 24, color: "#bbb", cursor: "pointer" }}>{"\u00d7"}</button>
+        </div>
+
+        {item.photo_url && (
+          <div style={{ marginBottom: 16, borderRadius: 12, overflow: "hidden", background: "#f0ede8" }}>
+            <img src={item.photo_url} alt="" style={{ width: "100%", maxHeight: 320, objectFit: "contain", display: "block" }} />
+          </div>
+        )}
+
+        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 10 }}>{item.comment || "No description"}</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+          {item.category_name && <span style={{ fontSize: 12, fontWeight: 700, color: catColor || "#666", background: catColor ? catColor + "18" : "#f4f4f4", padding: "3px 10px", borderRadius: 6 }}>{item.category_name}</span>}
+          {item.size && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{item.size}</span>}
+          {item.sell_price && <span style={{ fontSize: 14, fontWeight: 700 }}>{item.sell_price} kr</span>}
+        </div>
+
+        <div style={{ background: BG, borderRadius: 10, padding: "10px 14px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 13, fontFamily: "monospace", color: "#555" }}>{item.barcode}</span>
+          {item.buy_price && <span style={{ fontSize: 12, color: MUTED }}>Bought: {item.buy_price} kr</span>}
+        </div>
+        <div style={{ fontSize: 12, color: daysInStock(item) >= 90 && item.status === "in_stock" ? "#c33" : MUTED, marginBottom: 16, fontWeight: daysInStock(item) >= 90 && item.status === "in_stock" ? 700 : 400 }}>
+          {item.status === "sold" ? `Sold after ${daysInStock(item)} days in stock` : `${daysInStock(item)} days in stock`}
+        </div>
+
+        <button onClick={onPrint} style={{ width: "100%", padding: "14px", background: CARD, border: "2px solid " + DARK, borderRadius: 12, fontSize: 14, fontWeight: 700, color: DARK, cursor: "pointer", fontFamily: "inherit", marginBottom: 10 }}>{"\uD83D\uDDA8\uFE0F"} Print barcode</button>
+
+        {item.status === "in_stock" ? (
+          <button onClick={onSold} style={{ width: "100%", padding: "16px", background: "#06A77D", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>Mark as SOLD</button>
+        ) : (
+          <>
+            {!confirmRevert ? (
+              <button onClick={() => setConfirmRevert(true)} style={{ width: "100%", padding: "14px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 14, fontWeight: 600, color: "#666", cursor: "pointer", fontFamily: "inherit" }}>Revert to in stock</button>
+            ) : (
+              <div>
+                <div style={{ fontSize: 13, color: MUTED, marginBottom: 10, textAlign: "center" }}>This removes the linked sale from History.</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setConfirmRevert(false)} style={{ flex: 1, padding: "14px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 14, cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+                  <button onClick={onRevert} style={{ flex: 1, padding: "14px", background: "#E8973A", border: "none", borderRadius: 12, fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>Confirm revert</button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Print Label (barcode + description + price) ──
+function PrintLabel({ items, onClose }) {
+  const list = Array.isArray(items) ? items : [items];
+  const doPrint = () => { window.print(); };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <style>{`
+        @media print {
+          @page { size: 38mm 50mm; margin: 0; }
+          html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+          body * { visibility: hidden; }
+          #print-area, #print-area * { visibility: visible; }
+          #print-area { position: absolute; left: 0; top: 0; width: 38mm; }
+          .print-label { width: 38mm; height: 50mm; page-break-after: always; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 2mm; }
+          .print-label:last-child { page-break-after: auto; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+      <div style={{ background: CARD, borderRadius: 16, padding: 20, maxWidth: 360, width: "100%", maxHeight: "88vh", overflowY: "auto" }}>
+        <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 800 }}>{list.length > 1 ? `Print ${list.length} labels` : "Print label"}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 22, color: "#bbb", cursor: "pointer" }}>{"\u00d7"}</button>
+        </div>
+
+        {/* Print area — all labels, each 38x50mm */}
+        <div id="print-area">
+          {list.map((item, idx) => (
+            <div key={item.id || idx} className="print-label" style={{ background: "#fff", border: "1px solid " + BORDER, borderRadius: 8, padding: "10px 12px", textAlign: "center", marginBottom: 12, width: "38mm", minHeight: "50mm", boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#000", lineHeight: 1.25, marginBottom: 1, maxHeight: 28, overflow: "hidden" }}>{item.comment || item.category_name || "Item"}</div>
+                <div style={{ fontSize: 9, color: "#444" }}>{[item.category_name, item.size].filter(Boolean).join(" \u00b7 ")}</div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "center", margin: "2px 0" }}>
+                <BarcodeSVG value={item.barcode} height={88} />
+              </div>
+              <div>
+                <div style={{ fontSize: 9, fontFamily: "monospace", color: "#000", letterSpacing: 0.5 }}>{item.barcode}</div>
+                {item.sell_price != null && item.sell_price !== "" && <div style={{ fontSize: 17, fontWeight: 800, color: "#000", lineHeight: 1.1 }}>{item.sell_price} kr</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <button className="no-print" onClick={doPrint} style={{ width: "100%", padding: "14px", background: DARK, border: "none", borderRadius: 12, fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit", marginBottom: 8, marginTop: 8 }}>Print {list.length > 1 ? `all ${list.length}` : ""}</button>
+        <div className="no-print" style={{ fontSize: 11, color: MUTED, textAlign: "center", lineHeight: 1.4 }}>In the print dialog set paper to your 38mm (DK-22225) label roll, length 50mm and margins to none. If sizing looks wrong on iPad, that's the known AirPrint issue — tell me and I'll switch on PDF export.</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Days in stock helper ──
+function daysInStock(item) {
+  const start = new Date(item.added_at || item.created_at);
+  const end = item.status === "sold" && item.sold_at ? new Date(item.sold_at) : new Date();
+  return Math.max(0, Math.floor((end - start) / 86400000));
+}
+
+// ── Continuous Scanner: scan → confirm sold → keep scanning (zxing camera + Bluetooth input) ──
+function ContinuousScanner({ inventory, onLookup, onSell, onClose }) {
+  const videoRef = useRef();
+  const [manual, setManual] = useState("");
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(null); // item awaiting sold confirm
+  const [cleared, setCleared] = useState([]);    // running tally of cleared items this session
+  const controlsRef = useRef(null);
+  const lastScanRef = useRef({ code: "", t: 0 });
+
+  const handleCode = async (code) => {
+    // debounce duplicate reads of the same code within 2.5s
+    const now = Date.now();
+    if (code === lastScanRef.current.code && now - lastScanRef.current.t < 2500) return;
+    lastScanRef.current = { code, t: now };
+    if (pending) return; // already confirming one
+    const item = await onLookup(code);
+    if (item && item.status === "in_stock") setPending(item);
+  };
+
+  useEffect(() => {
+    let active = true;
+    const reader = new BrowserMultiFormatReader();
+    (async () => {
+      try {
+        const controls = await reader.decodeFromVideoDevice(undefined, videoRef.current, (result) => {
+          if (!active || !result) return;
+          handleCode(result.getText());
+        });
+        controlsRef.current = controls;
+      } catch (e) {
+        setError("Couldn't access camera. Type/scan the code in the box below.");
+      }
+    })();
+    return () => { active = false; try { controlsRef.current && controlsRef.current.stop(); } catch {} };
+  }, [pending]);
+
+  const confirmSold = async () => {
+    const item = pending;
+    setPending(null);
+    await onSell(item);
+    setCleared(c => [...c, item]);
+    setManual("");
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.9)", zIndex: 700, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ width: "100%", maxWidth: 420 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>Scan to sell</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 26, color: "#fff", cursor: "pointer" }}>{"\u00d7"}</button>
+        </div>
+
+        {cleared.length > 0 && (
+          <div style={{ background: "#06A77D", color: "#fff", borderRadius: 10, padding: "8px 14px", marginBottom: 12, fontSize: 13, fontWeight: 700, textAlign: "center" }}>
+            {cleared.length} item{cleared.length !== 1 ? "s" : ""} marked sold this session
+          </div>
+        )}
+
+        {pending ? (
+          <div style={{ background: "#fff", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+            <div style={{ display: "flex", gap: 12, marginBottom: 14 }}>
+              <div style={{ width: 56, height: 72, borderRadius: 8, background: "#f0ede8", overflow: "hidden", flexShrink: 0 }}>
+                {pending.photo_url ? <img src={pending.photo_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : null}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>{pending.comment || "No description"}</div>
+                <div style={{ fontSize: 12, color: MUTED }}>{[pending.category_name, pending.size].filter(Boolean).join(" \u00b7 ")}</div>
+                {pending.sell_price && <div style={{ fontSize: 16, fontWeight: 800, marginTop: 4 }}>{pending.sell_price} kr</div>}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setPending(null)} style={{ flex: 1, padding: "14px", background: CARD, border: "2px solid " + BORDER, borderRadius: 10, fontSize: 14, fontWeight: 600, color: "#666", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+              <button onClick={confirmSold} style={{ flex: 2, padding: "14px", background: "#06A77D", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>Mark SOLD &amp; continue</button>
+            </div>
+          </div>
+        ) : !error ? (
+          <div style={{ position: "relative", borderRadius: 14, overflow: "hidden", background: "#000", marginBottom: 14 }}>
+            <video ref={videoRef} playsInline muted style={{ width: "100%", display: "block" }} />
+            <div style={{ position: "absolute", inset: "18%", border: "2px solid #06A77D", borderRadius: 12, boxShadow: "0 0 12px rgba(6,167,125,0.6)" }} />
+          </div>
+        ) : (
+          <div style={{ background: "#fff", borderRadius: 12, padding: 16, marginBottom: 14, fontSize: 13, color: "#555", lineHeight: 1.5 }}>{error}</div>
+        )}
+
+        {!pending && (
+          <>
+            <input autoFocus value={manual} onChange={e => setManual(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && manual.trim()) { handleCode(manual.trim()); setManual(""); } }} placeholder="Or type / scan code here" style={{ ...S.field, marginBottom: 10 }} />
+            <button onClick={() => { if (manual.trim()) { handleCode(manual.trim()); setManual(""); } }} style={{ width: "100%", padding: "14px", background: "#06A77D", border: "none", borderRadius: 12, fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>Find item</button>
+          </>
+        )}
+
+        <button onClick={onClose} style={{ width: "100%", padding: "12px", background: "transparent", border: "none", color: "#aaa", fontSize: 13, cursor: "pointer", fontFamily: "inherit", marginTop: 10 }}>Done</button>
       </div>
     </div>
   );
