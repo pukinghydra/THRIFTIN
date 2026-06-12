@@ -153,7 +153,7 @@ async function compressPhoto(file, maxW = 1200, q = 0.8) {
 
 const api = {
   get: async (table, params = "") => { const r = await fetch(sb.url + "/" + table + "?select=*" + params, { headers: sb.h }); return r.ok ? r.json() : []; },
-  post: async (table, body) => { const r = await fetch(sb.url + "/" + table, { method: "POST", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); return r.ok ? (await r.json())[0] : null; },
+  post: async (table, body) => { const r = await fetch(sb.url + "/" + table, { method: "POST", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Save failed (" + r.status + "): " + txt.slice(0, 200)); } return (await r.json())[0]; },
   patch: async (table, id, body) => { const r = await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "PATCH", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); return r.ok ? (await r.json())[0] : null; },
   del: async (table, id) => { await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "DELETE", headers: sb.h }); },
   upload: async (blob) => {
@@ -1413,18 +1413,22 @@ function StockScreen({ inventory, cats, currentUser, onChanged, onCatAdded, show
 
   // Mark as sold: also creates a sale entry so it flows into History
   const markSold = async (item) => {
-    const sale = await api.post("sales", {
-      user_id: currentUser.id, user_name: currentUser.name,
-      category_id: item.category_id, category_name: item.category_name,
-      size: item.size, comment: item.comment,
-      price: item.sell_price, photo_url: item.photo_url,
-    });
-    await api.patch("inventory", item.id, {
-      status: "sold", sold_at: new Date().toISOString(),
-      sold_sale_id: sale?.id || null,
-    });
-    await onChanged();
-    showToast("Marked sold");
+    try {
+      const sale = await api.post("sales", {
+        user_id: currentUser.id, user_name: currentUser.name,
+        category_id: item.category_id, category_name: item.category_name,
+        size: item.size, comment: item.comment, gender: item.gender || null,
+        price: item.sell_price, photo_url: item.photo_url,
+      });
+      await api.patch("inventory", item.id, {
+        status: "sold", sold_at: new Date().toISOString(),
+        sold_sale_id: sale?.id || null,
+      });
+      await onChanged();
+      showToast("Marked sold");
+    } catch (e) {
+      showToast("Could not mark sold: " + (e.message || "error"));
+    }
   };
 
   // Revert sold → in_stock, and remove the linked sale entry
@@ -1559,6 +1563,7 @@ function StockCard({ item, cats, onClick }) {
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
           {item.category_name && <span style={{ fontSize: 11, fontWeight: 700, color: catColor || "#666", background: catColor ? catColor + "18" : "#f4f4f4", padding: "2px 8px", borderRadius: 5 }}>{item.category_name}</span>}
           {item.size && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{item.size}</span>}
+          {item.gender && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{genderLabel(item.gender)}</span>}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span style={{ fontSize: 10, color: MUTED, fontFamily: "monospace" }}>{item.barcode}</span>
@@ -1576,11 +1581,13 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
   const [photo, setPhoto] = useState(null);
   const [catId, setCatId] = useState("");
   const [size, setSize] = useState("");
+  const [gender, setGender] = useState("");
   const [comment, setComment] = useState("");
   const [buyPrice, setBuyPrice] = useState("");
   const [sellPrice, setSellPrice] = useState("");
   const [busy, setBusy] = useState(false);
   const [showAddCat, setShowAddCat] = useState(false);
+  const [err, setErr] = useState("");
   const fileRef = useRef();
 
   const cat = cats.find(c => c.id === catId);
@@ -1595,37 +1602,46 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
 
   const resetForm = (keepCat) => {
     setPhoto(null); setComment(""); setBuyPrice(""); setSellPrice("");
-    if (!keepCat) { setCatId(""); setSize(""); }
-    else { setSize(""); } // keep category, clear size for next item
+    if (!keepCat) { setCatId(""); setSize(""); setGender(""); }
+    else { setSize(""); } // keep category (and gender) for next item
   };
 
   const save = async (mode) => {
     if (busy) return;
+    setErr("");
     setBusy(true);
-    let photo_url = null;
-    if (photo) photo_url = await api.upload(photo.blob);
-    const barcode = await api.nextBarcode();
-    const item = await api.post("inventory", {
-      barcode, comment: comment.trim() || null,
-      category_id: catId || null, category_name: cat?.name || null,
-      size: size || null,
-      buy_price: buyPrice ? parseFloat(buyPrice) : null,
-      sell_price: sellPrice ? parseFloat(sellPrice) : null,
-      photo_url, status: "in_stock",
-      user_id: currentUser.id, user_name: currentUser.name,
-      added_at: new Date().toISOString(),
-    });
-    setBusy(false);
-    if (mode === "queue") {
-      resetForm(true); // keep category for fast haul entry
-      showToast("Added + queued \u2192 next item");
+    try {
+      let photo_url = null;
+      if (photo) photo_url = await api.upload(photo.blob);
+      const barcode = await api.nextBarcode();
+      const item = await api.post("inventory", {
+        barcode, comment: comment.trim() || null,
+        category_id: catId || null, category_name: cat?.name || null,
+        size: size || null,
+        gender: gender || null,
+        buy_price: buyPrice ? parseFloat(buyPrice) : null,
+        sell_price: sellPrice ? parseFloat(sellPrice) : null,
+        photo_url, status: "in_stock",
+        user_id: currentUser.id, user_name: currentUser.name,
+        added_at: new Date().toISOString(),
+      });
+      setBusy(false);
+      if (mode === "queue") {
+        resetForm(true); // keep category for fast haul entry
+        showToast("Added + queued \u2192 next item");
+      }
+      onDone(item, mode);
+    } catch (e) {
+      setBusy(false);
+      setErr(e.message || "Could not save. Check connection and that the inventory table exists.");
     }
-    onDone(item, mode);
   };
 
   const addCat = async (name, sizeType) => {
-    const c = await api.post("categories", { name, size_type: sizeType, color: CCOLORS[Math.floor(Math.random() * CCOLORS.length)] });
-    if (c) { await onCatAdded(); setCatId(c.id); setSize(""); setShowAddCat(false); }
+    try {
+      const c = await api.post("categories", { name, size_type: sizeType, color: CCOLORS[Math.floor(Math.random() * CCOLORS.length)] });
+      if (c) { await onCatAdded(); setCatId(c.id); setSize(""); setShowAddCat(false); }
+    } catch (e) { setErr(e.message || "Could not add category."); }
   };
 
   return (
@@ -1675,6 +1691,15 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
         </div>
       )}
 
+      <div style={S.card}>
+        <label style={S.label}>Department</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[["mens", "Men's"], ["womens", "Women's"], ["unisex", "Unisex"]].map(([k, l]) => (
+            <button key={k} onClick={() => setGender(gender === k ? "" : k)} style={{ ...S.chip(gender === k, null), flex: 1, textAlign: "center" }}>{l}</button>
+          ))}
+        </div>
+      </div>
+
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <div style={{ ...S.card, flex: 1, marginBottom: 0 }}>
           <label style={S.label}>Buy price</label>
@@ -1685,6 +1710,12 @@ function AddStock({ cats, currentUser, onCatAdded, onDone, onCancel, showToast }
           <input type="number" inputMode="numeric" value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={S.field} />
         </div>
       </div>
+
+      {err && (
+        <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 10, padding: "12px 14px", marginBottom: 12, fontSize: 13, color: "#A33", lineHeight: 1.4 }}>
+          {err}
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
         <button onClick={() => save("queue")} disabled={busy} style={{ flex: 1, padding: "16px", background: "#E8973A", border: "none", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>
@@ -1725,6 +1756,7 @@ function StockDetail({ item, cats, onClose, onSold, onRevert, onPrint }) {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
           {item.category_name && <span style={{ fontSize: 12, fontWeight: 700, color: catColor || "#666", background: catColor ? catColor + "18" : "#f4f4f4", padding: "3px 10px", borderRadius: 6 }}>{item.category_name}</span>}
           {item.size && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{item.size}</span>}
+          {item.gender && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{genderLabel(item.gender)}</span>}
           {item.sell_price && <span style={{ fontSize: 14, fontWeight: 700 }}>{item.sell_price} kr</span>}
         </div>
 
@@ -1790,7 +1822,7 @@ function PrintLabel({ items, onClose }) {
             <div key={item.id || idx} className="print-label" style={{ background: "#fff", border: "1px solid " + BORDER, borderRadius: 8, padding: "10px 12px", textAlign: "center", marginBottom: 12, width: "38mm", minHeight: "50mm", boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between" }}>
               <div>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#000", lineHeight: 1.25, marginBottom: 1, maxHeight: 28, overflow: "hidden" }}>{item.comment || item.category_name || "Item"}</div>
-                <div style={{ fontSize: 9, color: "#444" }}>{[item.category_name, item.size].filter(Boolean).join(" \u00b7 ")}</div>
+                <div style={{ fontSize: 9, color: "#444" }}>{[genderLabel(item.gender), item.category_name, item.size].filter(Boolean).join(" \u00b7 ")}</div>
               </div>
               <div style={{ display: "flex", justifyContent: "center", margin: "2px 0" }}>
                 <BarcodeSVG value={item.barcode} height={88} />
@@ -1811,6 +1843,12 @@ function PrintLabel({ items, onClose }) {
 }
 
 // ── Days in stock helper ──
+function genderLabel(g) {
+  if (g === "mens") return "Men's";
+  if (g === "womens") return "Women's";
+  if (g === "unisex") return "Unisex";
+  return "";
+}
 function daysInStock(item) {
   const start = new Date(item.added_at || item.created_at);
   const end = item.status === "sold" && item.sold_at ? new Date(item.sold_at) : new Date();
