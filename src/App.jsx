@@ -1181,7 +1181,7 @@ function HistoryScreen({ sales, cats, users, adminMode, onChanged, onCatAdded })
 
   return (
     <div>
-      {editing && <EditModal sale={editing} cats={cats} users={users} onCatAdded={onCatAdded} onSave={async patch => { await api.patch("sales", editing.id, patch); await onChanged(); setEditing(null); }} onClose={() => setEditing(null)} />}
+      {editing && <EditModal sale={editing} cats={cats} users={users} adminMode={adminMode} onCatAdded={onCatAdded} onSave={async patch => { await api.patch("sales", editing.id, patch); await onChanged(); setEditing(null); }} onClose={() => setEditing(null)} />}
       {confirmDel && <ConfirmDel sale={confirmDel} onYes={async () => { await api.del("sales", confirmDel.id); await onChanged(); setConfirmDel(null); }} onNo={() => setConfirmDel(null)} />}
       {showFullSummary && <FullSummary sales={summarySales} cats={cats} onClose={() => setShowFullSummary(false)} />}
 
@@ -1385,7 +1385,7 @@ function SaleCard({ sale, cats, users, adminMode, onEdit, onDel }) {
 }
 
 // ── Edit Modal ──
-function EditModal({ sale, cats, users, onSave, onClose, onCatAdded }) {
+function EditModal({ sale, cats, users, adminMode, onSave, onClose, onCatAdded }) {
   const [photo, setPhoto] = useState(sale.photo_url ? { url: sale.photo_url } : null);
   const [photoChanged, setPC] = useState(false);
   const [confirmPhotoDel, setCPD] = useState(false);
@@ -1394,6 +1394,7 @@ function EditModal({ sale, cats, users, onSave, onClose, onCatAdded }) {
   const [comment, setComment] = useState(sale.comment || "");
   const [price, setPrice] = useState(sale.price || "");
   const [userId, setUserId] = useState(sale.user_id || "");
+  const [soldDate, setSoldDate] = useState(sale.sold_at || (sale.created_at || "").slice(0, 10));
   const [busy, setBusy] = useState(false);
   const [showAddCat, setShowAddCat] = useState(false);
   const fileRef = useRef();
@@ -1418,7 +1419,9 @@ function EditModal({ sale, cats, users, onSave, onClose, onCatAdded }) {
     let photo_url = sale.photo_url;
     if (photoChanged) photo_url = photo?.blob ? await api.upload(photo.blob) : null;
     const u = users.find(x => x.id === userId);
-    await onSave({ photo_url, category_id: catId || null, category_name: cat?.name || null, size: size || null, comment: comment.trim() || null, price: price ? parseFloat(price) : null, user_id: userId || null, user_name: u?.name || null });
+    const patch = { photo_url, category_id: catId || null, category_name: cat?.name || null, size: size || null, comment: comment.trim() || null, price: price ? parseFloat(price) : null, user_id: userId || null, user_name: u?.name || null };
+    if (adminMode && soldDate) patch.sold_at = soldDate;
+    await onSave(patch);
   };
 
   const addCat = async (name, sizeType) => {
@@ -1499,6 +1502,13 @@ function EditModal({ sale, cats, users, onSave, onClose, onCatAdded }) {
             </button>
           ))}
         </div>
+
+        {adminMode && (
+          <>
+            <label style={{ ...S.label, color: "#c33" }}>Sale date (admin)</label>
+            <input type="date" value={soldDate} onChange={e => setSoldDate(e.target.value)} style={{ ...S.field, marginBottom: 20 }} />
+          </>
+        )}
 
         <button onClick={save} disabled={busy} style={{ ...S.btn(!busy), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving..." : "Save changes"}</button>
       </div>
@@ -1665,7 +1675,7 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
       {printBatch && <PrintLabel items={printBatch} onClose={() => { const ids = printBatch.map(i => i.id); setQueue(q => q.filter(id => !ids.includes(id))); setQueueSel(s => s.filter(id => !ids.includes(id))); setPrintBatch(null); }} />}
       {zoomPhoto && <PhotoZoom url={zoomPhoto} onClose={() => setZoomPhoto("")} />}
       {detailItem && <StockDetail item={detailItem} cats={cats} adminMode={adminMode} onZoom={(u) => setZoomPhoto(u)} onClose={() => setDetailItem(null)} onSold={async () => { await markSold(detailItem); setDetailItem(null); }} onRevert={async () => { await revertSold(detailItem); setDetailItem(null); }} onPrint={() => { setPrintItem(detailItem); setDetailItem(null); }} onEdit={() => { setEditItem(detailItem); setDetailItem(null); }} onDelete={() => { setConfirmDelItem(detailItem); setDetailItem(null); }} />}
-      {editItem && <EditStock item={editItem} cats={cats} brands={brands} onCatAdded={onCatAdded} onBrandAdded={onBrandAdded} onSave={async (patch) => { await saveItemEdit(editItem, patch); setEditItem(null); }} onClose={() => setEditItem(null)} />}
+      {editItem && <EditStock item={editItem} cats={cats} brands={brands} adminMode={adminMode} onCatAdded={onCatAdded} onBrandAdded={onBrandAdded} onSave={async (patch) => { await saveItemEdit(editItem, patch); setEditItem(null); }} onClose={() => setEditItem(null)} />}
       {confirmDelItem && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div style={{ background: CARD, borderRadius: 16, padding: 24, maxWidth: 330 }}>
@@ -2051,7 +2061,7 @@ function StockDetail({ item, cats, adminMode, onZoom, onClose, onSold, onRevert,
 }
 
 // ── Edit Stock item (admin): all fields incl. photo ──
-function EditStock({ item, cats, brands, onSave, onClose, onCatAdded, onBrandAdded }) {
+function EditStock({ item, cats, brands, adminMode, onSave, onClose, onCatAdded, onBrandAdded }) {
   const [photo, setPhoto] = useState(item.photo_url ? { url: item.photo_url } : null);
   const [photoChanged, setPC] = useState(false);
   const [catId, setCatId] = useState(item.category_id || "");
@@ -2061,6 +2071,7 @@ function EditStock({ item, cats, brands, onSave, onClose, onCatAdded, onBrandAdd
   const [sleeve, setSleeve] = useState(item.sleeve || "");
   const [comment, setComment] = useState(item.comment || "");
   const [sellPrice, setSellPrice] = useState(item.sell_price ?? "");
+  const [addedDate, setAddedDate] = useState((item.added_at || item.created_at || "").slice(0, 10));
   const [busy, setBusy] = useState(false);
   const [showAddCat, setShowAddCat] = useState(false);
   const [err, setErr] = useState("");
@@ -2087,6 +2098,7 @@ function EditStock({ item, cats, brands, onSave, onClose, onCatAdded, onBrandAdd
         brand: brand || null,
         sleeve: isShirtCat(cat) ? (sleeve || null) : null,
         sell_price: sellPrice !== "" ? parseFloat(sellPrice) : null,
+        ...(adminMode && addedDate ? { added_at: new Date(addedDate + "T12:00:00").toISOString() } : {}),
       });
     } catch (e) { setBusy(false); setErr(e.message || "Could not save"); }
   };
@@ -2169,6 +2181,14 @@ function EditStock({ item, cats, brands, onSave, onClose, onCatAdded, onBrandAdd
           <label style={S.label}>Sell price</label>
           <input type="number" value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={S.field} />
         </div>
+
+        {adminMode && (
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ ...S.label, color: "#c33" }}>Date added (admin)</label>
+            <input type="date" value={addedDate} onChange={e => setAddedDate(e.target.value)} style={S.field} />
+            <div style={{ fontSize: 11, color: MUTED, marginTop: 4 }}>Changes the days-in-stock count.</div>
+          </div>
+        )}
 
         {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 12, color: "#A33" }}>{err}</div>}
 
