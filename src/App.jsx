@@ -314,13 +314,16 @@ export default function App() {
         <div style={{ display: tab === "history" ? "block" : "none" }}>
           <HistoryScreen sales={sales} cats={cats} users={users} adminMode={adminMode} onChanged={refresh} onCatAdded={refresh} />
         </div>
+        <div style={{ display: tab === "shifts" ? "block" : "none" }}>
+          <ShiftsScreen users={users} currentUser={currentUser} adminMode={adminMode} />
+        </div>
         <div style={{ display: tab === "stock" ? "block" : "none" }}>
           <StockScreen inventory={inventory} cats={cats} brands={brands} currentUser={currentUser} adminMode={adminMode} onChanged={refresh} onCatAdded={refresh} onBrandAdded={refresh} showToast={showToast} />
         </div>
       </div>
 
       <nav style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: CARD, borderTop: "1px solid " + BORDER, display: "flex", zIndex: 100, paddingBottom: "env(safe-area-inset-bottom)" }}>
-        {[["log", "Log sale", "\uD83D\uDCF7"], ["stock", "Stock", "\uD83C\uDFF7\uFE0F"], ["history", "History", "\uD83D\uDDC2"]].map(([id, lbl, icon]) => (
+        {[["log", "Log sale", "\uD83D\uDCF7"], ["stock", "Stock", "\uD83C\uDFF7\uFE0F"], ["history", "History", "\uD83D\uDDC2"], ["shifts", "Schedule", "\uD83D\uDCC5"]].map(([id, lbl, icon]) => (
           <button key={id} onClick={() => setTab(id)} style={{ flex: 1, padding: "11px 0 9px", background: "none", border: "none", borderTop: "3px solid " + (tab === id ? DARK : "transparent"), color: tab === id ? DARK : "#bbb", cursor: "pointer", fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>
             <div style={{ fontSize: 20, marginBottom: 2 }}>{icon}</div>{lbl}
           </button>
@@ -373,6 +376,418 @@ function UserPicker({ users, onPick, onAdd }) {
   );
 }
 
+// ── Schedule / shifts / hours ──────────────────────────────
+const WD_KEYS  = ["sun","mon","tue","wed","thu","fri","sat"];
+const WD_LABEL = { mon:"Mon", tue:"Tue", wed:"Wed", thu:"Thu", fri:"Fri", sat:"Sat", sun:"Sun" };
+const MO_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const MO_LONG  = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+function dateToStr(d){const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),da=String(d.getDate()).padStart(2,"0");return y+"-"+m+"-"+da;}
+function strToDate(s){return new Date(s+"T12:00:00");}
+function weekdayKey(s){return WD_KEYS[strToDate(s).getDay()];}
+function templateHours(u,s){const t=u&&u.hours_template;if(!t)return"";const v=t[weekdayKey(s)];return(v===0||v)?v:"";}
+function fmtDay(s){const d=strToDate(s);return WD_LABEL[WD_KEYS[d.getDay()]]+" "+d.getDate()+" "+MO_SHORT[d.getMonth()];}
+function hoursNum(v){const n=parseFloat(v);return isNaN(n)?0:n;}
+
+const stepBtn = { width:38, height:38, borderRadius:10, border:"2px solid "+BORDER, background:CARD, fontSize:20, fontWeight:700, color:DARK, cursor:"pointer", fontFamily:"inherit", lineHeight:1 };
+
+function HoursStepper({ value, onChange }) {
+  const v = (value === "" || value == null) ? "" : value;
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+      <button onClick={() => onChange(Math.max(0, hoursNum(v) - 0.5))} style={stepBtn}>{"\u2212"}</button>
+      <input type="number" inputMode="decimal" step="0.5" value={v}
+        onChange={e => onChange(e.target.value === "" ? "" : parseFloat(e.target.value))}
+        style={{ width:72, textAlign:"center", padding:"9px 6px", border:"2px solid "+BORDER, borderRadius:10, fontSize:17, fontWeight:700, fontFamily:"inherit", color:DARK, background:CARD, outline:"none" }} />
+      <span style={{ fontSize:14, color:MUTED }}>h</span>
+      <button onClick={() => onChange(hoursNum(v) + 0.5)} style={stepBtn}>+</button>
+    </div>
+  );
+}
+
+function ShiftsScreen({ users, currentUser, adminMode }) {
+  const [shifts, setShifts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [adjusting, setAdjusting] = useState(false);
+  const [adjHours, setAdjHours] = useState("");
+  const [adminUserId, setAdminUserId] = useState(null);
+  const [monthOff, setMonthOff] = useState(0);
+  const [editDay, setEditDay] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [moveSource, setMoveSource] = useState(null);
+
+  const load = useCallback(async () => {
+    try { const s = await api.get("shifts", "&order=date.desc"); setShifts(s); }
+    catch (e) { setErr(e.message || "Could not load schedule"); }
+  }, []);
+  useEffect(() => { (async () => { await load(); setLoading(false); })(); }, [load]);
+
+  const today = dateToStr(new Date());
+  const me = users.find(u => u.id === currentUser.id) || currentUser;
+  const findShift = (uid, dstr) => shifts.find(s => s.user_id === uid && s.date === dstr);
+
+  const upsert = async (u, dstr, patch) => {
+    setErr("");
+    try {
+      const ex = findShift(u.id, dstr);
+      if (ex) await api.patch("shifts", ex.id, patch);
+      else await api.post("shifts", { user_id: u.id, user_name: u.name, date: dstr, ...patch });
+      await load();
+    } catch (e) { setErr(e.message || "Save failed"); }
+  };
+  const clearShift = async (id) => { setErr(""); try { await api.del("shifts", id); await load(); } catch (e) { setErr(e.message || "Delete failed"); } };
+
+  const doMove = async (destDs) => {
+    const src = moveSource;
+    if (!src) return;
+    if (destDs === src.ds) { setMoveSource(null); return; }
+    setErr("");
+    try {
+      const destSh = shifts.find(s => s.user_id === src.userId && s.date === destDs);
+      if (destSh) {
+        await api.patch("shifts", src.sh.id, { status: destSh.status, hours: destSh.hours });
+        await api.patch("shifts", destSh.id, { status: src.sh.status, hours: src.sh.hours });
+      } else {
+        await api.post("shifts", { user_id: src.userId, user_name: src.userName, date: destDs, status: src.sh.status, hours: src.sh.hours });
+        await api.del("shifts", src.sh.id);
+      }
+      await load();
+    } catch (e) { setErr(e.message || "Move failed"); }
+    setMoveSource(null);
+  };
+
+  const reassign = async (srcShift, srcDs, targetUser) => {
+    setErr("");
+    if (!srcShift) return;
+    if (shifts.find(s => s.user_id === targetUser.id && s.date === srcDs)) { setErr(targetUser.name + " already has a shift on " + fmtDay(srcDs) + "."); return; }
+    try {
+      const newHours = targetUser.tracks_hours ? srcShift.hours : null;
+      await api.patch("shifts", srcShift.id, { user_id: targetUser.id, user_name: targetUser.name, hours: newHours, status: srcShift.status });
+      await load();
+    } catch (e) { setErr(e.message || "Reassign failed"); }
+  };
+
+  if (loading) return <div style={{ padding:40, textAlign:"center", color:MUTED, fontSize:13 }}>Loading schedule...</div>;
+
+  const myToday = findShift(me.id, today);
+  const myHourly = !!me.tracks_hours;
+  const labelToday = <div style={{ fontSize:11, fontWeight:700, color:MUTED, letterSpacing:1.5, textTransform:"uppercase", marginBottom:6 }}>Today {"\u00b7"} {fmtDay(today)}</div>;
+
+  const adjustBlock = (onSave) => (
+    <div style={{ display:"flex", flexDirection:"column", gap:12, alignItems:"flex-start", marginTop:12 }}>
+      <HoursStepper value={adjHours} onChange={setAdjHours} />
+      <div style={{ display:"flex", gap:8, width:"100%" }}>
+        <button onClick={() => setAdjusting(false)} style={{ flex:1, padding:"12px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>Cancel</button>
+        <button onClick={async () => { await onSave(); setAdjusting(false); }} style={{ flex:2, ...S.btn(hoursNum(adjHours) > 0), padding:"12px" }}>Save {hoursNum(adjHours)}h</button>
+      </div>
+    </div>
+  );
+
+  const TodayCard = () => {
+    if (myHourly) {
+      if (myToday && myToday.status === "scheduled") {
+        return (
+          <div style={S.card}>
+            {labelToday}
+            <div style={{ fontSize:16, fontWeight:700, marginBottom:14 }}>Scheduled: {myToday.hours}h</div>
+            {!adjusting ? (
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                <button onClick={() => upsert(me, today, { status:"worked", hours: myToday.hours })} style={S.btn(true)}>Confirm worked {"\u2014"} {myToday.hours}h</button>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => { setAdjHours(myToday.hours); setAdjusting(true); }} style={{ flex:1, padding:"12px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"inherit" }}>Different hours</button>
+                  <button onClick={() => upsert(me, today, { status:"off", hours:null })} style={{ flex:1, padding:"12px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:13, fontWeight:600, color:"#c33", cursor:"pointer", fontFamily:"inherit" }}>Didn{"\u2019"}t work</button>
+                </div>
+              </div>
+            ) : adjustBlock(() => upsert(me, today, { status:"worked", hours: hoursNum(adjHours) }))}
+          </div>
+        );
+      }
+      if (myToday && myToday.status === "worked") {
+        return (
+          <div style={{ ...S.card, borderColor:"#bfe3cf", background:"#F2FAF5" }}>
+            {labelToday}
+            <div style={{ fontSize:16, fontWeight:700, color:"#2C6E49" }}>{"\u2713"} Logged {myToday.hours}h</div>
+            {!adjusting
+              ? <button onClick={() => { setAdjHours(myToday.hours); setAdjusting(true); }} style={{ marginTop:10, padding:"8px 14px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"inherit" }}>Edit</button>
+              : adjustBlock(() => upsert(me, today, { status:"worked", hours: hoursNum(adjHours) }))}
+          </div>
+        );
+      }
+      if (myToday && myToday.status === "off") {
+        return (
+          <div style={S.card}>
+            {labelToday}
+            <div style={{ fontSize:15, fontWeight:600, color:MUTED }}>Marked as not worked</div>
+            <button onClick={() => clearShift(myToday.id)} style={{ marginTop:10, padding:"8px 14px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"inherit" }}>Undo</button>
+          </div>
+        );
+      }
+      const pre = templateHours(me, today) || "";
+      return (
+        <div style={S.card}>
+          {labelToday}
+          <div style={{ fontSize:15, fontWeight:600, color:MUTED, marginBottom:14 }}>Not scheduled today</div>
+          {!adjusting
+            ? <button onClick={() => { setAdjHours(pre); setAdjusting(true); }} style={S.btn(true)}>Log a day worked</button>
+            : adjustBlock(() => upsert(me, today, { status:"worked", hours: hoursNum(adjHours) }))}
+        </div>
+      );
+    }
+    return (
+      <div style={S.card}>
+        {labelToday}
+        <div style={{ fontSize:15, fontWeight:600, color: myToday ? DARK : MUTED }}>{myToday ? "You\u2019re on the schedule today" : "Not on the schedule today"}</div>
+      </div>
+    );
+  };
+
+  const upcoming = shifts.filter(s => s.date >= today && s.status !== "off");
+  const byDate = {};
+  upcoming.forEach(s => { (byDate[s.date] = byDate[s.date] || []).push(s); });
+  const upcomingDates = Object.keys(byDate).sort().slice(0, 10);
+  const ucolor = (uid) => { const u = users.find(x => x.id === uid); return u ? (u.color || "#888") : "#888"; };
+
+  const adminUser = users.find(u => u.id === adminUserId) || users.find(u => u.tracks_hours) || users[0];
+  const base = new Date(); base.setDate(1); base.setMonth(base.getMonth() + monthOff);
+  const yr = base.getFullYear(), mo = base.getMonth();
+  const daysInMonth = new Date(yr, mo + 1, 0).getDate();
+  const monthDays = [];
+  for (let d = 1; d <= daysInMonth; d++) monthDays.push(dateToStr(new Date(yr, mo, d)));
+  const monthShifts = adminUser ? monthDays.map(ds => ({ ds, sh: findShift(adminUser.id, ds) })) : [];
+  const workedHours = monthShifts.reduce((sum, x) => sum + (x.sh && x.sh.status === "worked" ? hoursNum(x.sh.hours) : 0), 0);
+  const workedDays = monthShifts.filter(x => x.sh && x.sh.status === "worked").length;
+  const pendingPast = monthShifts.filter(x => x.sh && x.sh.status === "scheduled" && x.ds < today);
+
+  const buildExport = () => {
+    let out = adminUser.name + " \u2014 " + MO_LONG[mo] + " " + yr + "\n\n";
+    monthShifts.forEach(x => { if (x.sh && x.sh.status === "worked") out += fmtDay(x.ds) + "  " + x.sh.hours + "h\n"; });
+    out += "\nTotal: " + workedHours + "h  (" + workedDays + " days)";
+    return out;
+  };
+  const copyExport = async () => { try { await navigator.clipboard.writeText(buildExport()); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {} };
+
+  const applyBaseline = async () => {
+    if (!adminUser || !adminUser.hours_template) { setErr("No baseline set. Set " + (adminUser ? adminUser.name : "this person") + "'s weekly hours in Admin first."); return; }
+    setErr("");
+    try {
+      const tpl = adminUser.hours_template;
+      for (const { ds, sh } of monthShifts) {
+        if (sh) continue;
+        const v = tpl[weekdayKey(ds)];
+        if (v === 0 || v) await api.post("shifts", { user_id: adminUser.id, user_name: adminUser.name, date: ds, status: "scheduled", hours: v });
+      }
+      await load();
+    } catch (e) { setErr(e.message || "Could not apply baseline"); }
+  };
+
+  return (
+    <div style={{ padding:"16px 16px 0" }}>
+      {err && <div style={{ background:"#FDECEC", border:"1px solid #F0C0C0", color:"#A33", borderRadius:10, padding:"10px 12px", fontSize:13, marginBottom:12 }}>{err}</div>}
+
+      <TodayCard />
+
+      <div style={{ fontSize:12, fontWeight:700, color:MUTED, letterSpacing:1.5, textTransform:"uppercase", margin:"22px 0 10px" }}>Upcoming</div>
+      {upcomingDates.length === 0 && <div style={{ color:MUTED, fontSize:13, paddingBottom:8 }}>Nothing scheduled yet.</div>}
+      {upcomingDates.map(ds => (
+        <div key={ds} style={{ ...S.card, padding:"12px 16px" }}>
+          <div style={{ fontSize:13, fontWeight:700, marginBottom:8 }}>{fmtDay(ds)}{ds === today ? "  \u00b7 today" : ""}</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+            {byDate[ds].map(s => (
+              <div key={s.id} style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 10px", background:BG, borderRadius:20, fontSize:13 }}>
+                <span style={{ width:9, height:9, borderRadius:"50%", background:ucolor(s.user_id) }} />
+                {s.user_name}
+                {s.hours != null && <span style={{ color:MUTED }}>{s.hours}h</span>}
+                {s.status === "worked" && <span style={{ color:"#2C6E49", fontSize:11 }}>{"\u2713"}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {adminMode && adminUser && (
+        <div style={{ marginTop:28, marginBottom:24 }}>
+          <div style={{ fontSize:10, fontWeight:800, color:"#c33", letterSpacing:1.2, marginBottom:12 }}>ADMIN {"\u2014"} SCHEDULE</div>
+
+          <div style={{ display:"flex", gap:8, overflowX:"auto", paddingBottom:8, marginBottom:14 }}>
+            {users.map(u => (
+              <button key={u.id} onClick={() => { setAdminUserId(u.id); setMoveSource(null); }} style={{ ...S.chip(adminUser.id === u.id, u.color), flexShrink:0 }}>
+                {u.name}{u.tracks_hours ? "" : " \u00b7 owner"}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+            <button onClick={() => { setMonthOff(monthOff - 1); setMoveSource(null); }} style={{ ...stepBtn, width:44 }}>{"\u2039"}</button>
+            <div style={{ fontSize:15, fontWeight:700 }}>{MO_LONG[mo]} {yr}</div>
+            <button onClick={() => { setMonthOff(monthOff + 1); setMoveSource(null); }} style={{ ...stepBtn, width:44 }}>{"\u203a"}</button>
+          </div>
+
+          {adminUser.tracks_hours && (
+            <div style={{ ...S.card, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontSize:22, fontWeight:800 }}>{workedHours}h</div>
+                <div style={{ fontSize:12, color:MUTED }}>{workedDays} days confirmed</div>
+              </div>
+              <button onClick={copyExport} style={{ padding:"12px 16px", background:DARK, border:"none", borderRadius:10, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>{copied ? "Copied \u2713" : "Copy for accountant"}</button>
+            </div>
+          )}
+
+          {adminUser.tracks_hours && pendingPast.length > 0 && (
+            <div style={{ background:"#FFF6E5", border:"1px solid #F0DCB0", borderRadius:10, padding:"10px 12px", fontSize:13, color:"#8A6D2F", marginBottom:12 }}>
+              {pendingPast.length} past day{pendingPast.length > 1 ? "s" : ""} scheduled but not confirmed {"\u2014"} won{"\u2019"}t count until you resolve them below.
+            </div>
+          )}
+
+          {!moveSource && (
+            <button onClick={applyBaseline} style={{ width:"100%", padding:"11px", background:CARD, border:"2px dashed "+BORDER, borderRadius:10, fontSize:13, fontWeight:600, color:"#555", cursor:"pointer", fontFamily:"inherit", marginBottom:12 }}>
+              Apply {adminUser.name}{"\u2019"}s baseline to this month
+            </button>
+          )}
+
+          {moveSource && (
+            <div style={{ background:"#EAF2FB", border:"1px solid #BBD4F0", borderRadius:10, padding:"10px 12px", marginBottom:12, display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+              <span style={{ fontSize:13, color:"#1D3557" }}>Moving {fmtDay(moveSource.ds)} {"\u2014"} tap a day to place it</span>
+              <button onClick={() => setMoveSource(null)} style={{ padding:"6px 12px", background:CARD, border:"1px solid #BBD4F0", borderRadius:8, fontSize:12, fontWeight:600, color:"#1D3557", cursor:"pointer", fontFamily:"inherit", flexShrink:0 }}>Cancel</button>
+            </div>
+          )}
+
+          {monthShifts.map(({ ds, sh }) => {
+            const past = ds < today, isToday = ds === today;
+            const isMoveSrc = moveSource && moveSource.ds === ds;
+            let right = <span style={{ color:"#ccc", fontSize:13 }}>{"\u2014"}</span>;
+            if (sh) {
+              if (sh.status === "worked") right = <span style={{ color:"#2C6E49", fontWeight:700, fontSize:14 }}>{sh.hours != null ? sh.hours + "h" : "in"} {"\u2713"}</span>;
+              else if (sh.status === "scheduled") right = <span style={{ color: past ? "#C58A1F" : "#555", fontWeight:600, fontSize:14 }}>{sh.hours != null ? sh.hours + "h" : "in"} {past ? "needs confirm" : "planned"}</span>;
+              else right = <span style={{ color:MUTED, fontSize:13 }}>off</span>;
+            }
+            const border = isMoveSrc ? "2px solid #1D3557" : (moveSource ? "2px dashed #BBD4F0" : "1px solid "+BORDER);
+            return (
+              <button key={ds} onClick={() => moveSource ? doMove(ds) : setEditDay({ ds, user: adminUser })} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", padding:"11px 14px", background: isMoveSrc ? "#EAF2FB" : (isToday ? "#F2F0EB" : CARD), border, borderRadius:10, marginBottom:6, cursor:"pointer", fontFamily:"inherit", textAlign:"left" }}>
+                <span style={{ fontSize:14, fontWeight: isToday ? 700 : 500 }}>{fmtDay(ds)}{isMoveSrc ? "  (moving)" : ""}</span>
+                {right}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {editDay && (
+        <DayEditorSheet
+          ds={editDay.ds} user={editDay.user} shift={findShift(editDay.user.id, editDay.ds)} users={users}
+          onClose={() => setEditDay(null)}
+          onMove={() => { const sh = findShift(editDay.user.id, editDay.ds); if (sh) { setMoveSource({ ds: editDay.ds, sh, userId: editDay.user.id, userName: editDay.user.name }); } setEditDay(null); }}
+          onReassign={async (tu) => { await reassign(findShift(editDay.user.id, editDay.ds), editDay.ds, tu); setEditDay(null); }}
+          onApply={async (patch) => { await upsert(editDay.user, editDay.ds, patch); setEditDay(null); }}
+          onClear={async (id) => { await clearShift(id); setEditDay(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DayEditorSheet({ ds, user, shift, users, onClose, onApply, onClear, onMove, onReassign }) {
+  const hourly = !!user.tracks_hours;
+  const others = (users || []).filter(u => u.id !== user.id);
+  const [hours, setHours] = useState(() => {
+    if (shift && shift.hours != null) return shift.hours;
+    const t = templateHours(user, ds);
+    return t === "" ? "" : t;
+  });
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", zIndex:650, display:"flex", alignItems:"flex-end", justifyContent:"center" }} onClick={onClose}>
+      <div style={{ width:"100%", maxWidth:480, background:CARD, borderRadius:"18px 18px 0 0", maxHeight:"88vh", overflowY:"auto", padding:"22px 20px 36px" }} onClick={e => e.stopPropagation()}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+          <div style={{ fontSize:17, fontWeight:800 }}>{user.name}</div>
+          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:24, color:"#aaa", cursor:"pointer" }}>{"\u00d7"}</button>
+        </div>
+        <div style={{ fontSize:13, color:MUTED, marginBottom:18 }}>{fmtDay(ds)}</div>
+
+        {hourly && (
+          <div style={{ marginBottom:18 }}>
+            <div style={S.label}>Hours</div>
+            <HoursStepper value={hours} onChange={setHours} />
+          </div>
+        )}
+
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {hourly ? (
+            <>
+              <button onClick={() => onApply({ status:"scheduled", hours: hoursNum(hours) })} style={{ padding:"13px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"inherit" }}>Schedule {hoursNum(hours)}h</button>
+              <button onClick={() => onApply({ status:"worked", hours: hoursNum(hours) })} style={S.btn(true)}>Mark worked {hoursNum(hours)}h</button>
+              <button onClick={() => onApply({ status:"off", hours:null })} style={{ padding:"13px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:14, fontWeight:600, color:"#c33", cursor:"pointer", fontFamily:"inherit" }}>Mark off</button>
+            </>
+          ) : (
+            <button onClick={() => onApply({ status:"scheduled", hours:null })} style={S.btn(true)}>Add to schedule</button>
+          )}
+          {shift && onMove && <button onClick={onMove} style={{ padding:"13px", background:CARD, border:"2px solid "+BORDER, borderRadius:10, fontSize:14, fontWeight:600, color:"#1D3557", cursor:"pointer", fontFamily:"inherit" }}>Move to another day (same person)</button>}
+        </div>
+
+        {shift && onReassign && others.length > 0 && (
+          <div style={{ marginTop:20 }}>
+            <div style={{ ...S.label, marginBottom:8 }}>Give this day to</div>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              {others.map(u => (
+                <button key={u.id} onClick={() => onReassign(u)} style={{ ...S.chip(false, u.color), padding:"8px 14px", fontSize:13 }}>{u.name}</button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {shift && (
+          <button onClick={() => onClear(shift.id)} style={{ width:"100%", marginTop:20, padding:"13px", background:"#FDECEC", border:"1px solid #F0C0C0", borderRadius:10, fontSize:14, fontWeight:700, color:"#c33", cursor:"pointer", fontFamily:"inherit" }}>Delete this shift</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function UserHoursConfig({ user, onChanged }) {
+  const init = { mon:"", tue:"", wed:"", thu:"", fri:"", sat:"", sun:"" };
+  const [tracks, setTracks] = useState(!!user.tracks_hours);
+  const [tpl, setTpl] = useState({ ...init, ...(user.hours_template || {}) });
+  const [saved, setSaved] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  const persist = async (nextTracks, nextTpl) => {
+    const clean = {};
+    Object.keys(nextTpl).forEach(k => { if (nextTpl[k] !== "" && nextTpl[k] != null) clean[k] = parseFloat(nextTpl[k]); });
+    await api.patch("users", user.id, { tracks_hours: nextTracks, hours_template: Object.keys(clean).length ? clean : null });
+    await onChanged();
+    setSaved(true); setTimeout(() => setSaved(false), 1200);
+  };
+  const toggle = async () => { const n = !tracks; setTracks(n); await persist(n, tpl); };
+  const saveTpl = async () => { await persist(tracks, tpl); setOpen(false); };
+
+  return (
+    <div style={{ marginTop:8 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <span style={{ fontSize:12, color:MUTED }}>{tracks ? "Hourly \u00b7 tracks hours" : "Owner / no hours"}</span>
+        <button onClick={toggle} style={{ padding:"5px 12px", background: tracks ? DARK : CARD, border:"2px solid "+(tracks ? DARK : BORDER), borderRadius:8, fontSize:11, fontWeight:700, color: tracks ? "#fff" : "#555", cursor:"pointer", fontFamily:"inherit" }}>{tracks ? "ON" : "OFF"}</button>
+      </div>
+      {tracks && (
+        <div style={{ marginTop:8 }}>
+          <button onClick={() => setOpen(o => !o)} style={{ fontSize:12, color:DARK, background:"none", border:"none", textDecoration:"underline", cursor:"pointer", fontFamily:"inherit", padding:0 }}>{open ? "Hide" : "Edit"} weekly hours{saved ? "  \u2713 saved" : ""}</button>
+          {open && (
+            <div style={{ marginTop:10 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:5 }}>
+                {["mon","tue","wed","thu","fri","sat","sun"].map(k => (
+                  <div key={k} style={{ textAlign:"center" }}>
+                    <div style={{ fontSize:10, color:MUTED, marginBottom:3 }}>{WD_LABEL[k]}</div>
+                    <input type="number" inputMode="decimal" step="0.5" value={tpl[k]} onChange={e => setTpl({ ...tpl, [k]: e.target.value })}
+                      style={{ width:"100%", textAlign:"center", padding:"7px 2px", border:"2px solid "+BORDER, borderRadius:8, fontSize:13, fontFamily:"inherit", outline:"none", color:DARK, boxSizing:"border-box" }} />
+                  </div>
+                ))}
+              </div>
+              <button onClick={saveTpl} style={{ marginTop:10, padding:"9px 14px", background:DARK, border:"none", borderRadius:8, color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>Save hours</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged }) {
   const [confirm, setConfirm] = useState(null);
 
@@ -402,12 +817,15 @@ function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged 
 
         <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>Staff members</div>
         {users.map(u => (
-          <div key={u.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 0", borderBottom: "1px solid " + BORDER }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ width: 12, height: 12, borderRadius: "50%", background: u.color }} />
-              <span style={{ fontSize: 15, fontWeight: 600 }}>{u.name}</span>
+          <div key={u.id} style={{ padding: "12px 0", borderBottom: "1px solid " + BORDER }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ width: 12, height: 12, borderRadius: "50%", background: u.color }} />
+                <span style={{ fontSize: 15, fontWeight: 600 }}>{u.name}</span>
+              </div>
+              <button onClick={() => setConfirm(u)} style={{ padding: "6px 14px", background: BG, border: "1px solid #e0d0d0", borderRadius: 8, fontSize: 12, color: "#c33", cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
             </div>
-            <button onClick={() => setConfirm(u)} style={{ padding: "6px 14px", background: BG, border: "1px solid #e0d0d0", borderRadius: 8, fontSize: 12, color: "#c33", cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
+            <UserHoursConfig user={u} onChanged={onChanged} />
           </div>
         ))}
 
