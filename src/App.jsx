@@ -5,10 +5,65 @@ import { BrowserMultiFormatReader } from "@zxing/browser";
 
 const SUPABASE_URL = "https://mpkazwsxjorocqajpkao.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1wa2F6d3N4am9yb2NxYWpwa2FvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwNzA4MTksImV4cCI6MjA5MzY0NjgxOX0.IZjuxlv40iOLEdOXJrYl1QfRKmo_nMYJZEH4FHU5ZiI";
+// ── App lock (PIN) ──────────────────────────────────────────────────────────
+// Staff type a shared PIN to unlock the app. The PIN is the password to ONE
+// hidden Supabase login (STAFF_EMAIL) — that login is what actually authenticates
+// the app to the database, so the lock holds even though the anon key is public.
+// The staff name picker (Vic / Richie / Charlie) is unchanged; this is separate.
+const REQUIRE_PIN = true;                  // master switch — set to false to turn the lock off entirely
+const STAFF_EMAIL = "staff@thriftin.se";   // hidden shared login; never shown to staff
+const UNLOCK_DAYS = 30;                     // re-ask for the PIN on a device after this many days
+
+let ACCESS_TOKEN = null;                    // current logged-in session token (null = fall back to anon key)
+
 const sb = {
-  h: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY, "Content-Type": "application/json" },
+  // Dynamic: once unlocked, every request uses the logged-in session token;
+  // before unlock (or if REQUIRE_PIN is off) it falls back to the public anon key.
+  get h() { return { apikey: SUPABASE_KEY, Authorization: "Bearer " + (ACCESS_TOKEN || SUPABASE_KEY), "Content-Type": "application/json" }; },
   url: SUPABASE_URL + "/rest/v1",
   sto: SUPABASE_URL + "/storage/v1/object",
+};
+
+const auth = {
+  // Restore a remembered unlock on app open (no PIN needed if still within the window).
+  async restore() {
+    try {
+      const raw = localStorage.getItem("thriftin_session");
+      const until = parseInt(localStorage.getItem("thriftin_unlock_until") || "0", 10);
+      if (!raw || !until || Date.now() > until) return false;        // never unlocked, or 30-day window passed
+      const s = JSON.parse(raw);
+      if (s.access_token && s.expires_at && s.expires_at * 1000 > Date.now() + 120000) { ACCESS_TOKEN = s.access_token; return true; }
+      if (s.refresh_token) return await auth._refresh(s.refresh_token);
+      return false;
+    } catch { return false; }
+  },
+  // Exchange the typed PIN for a real session.
+  async signIn(pin) {
+    try {
+      const r = await fetch(SUPABASE_URL + "/auth/v1/token?grant_type=password", { method: "POST", headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ email: STAFF_EMAIL, password: pin }) });
+      if (!r.ok) return false;
+      auth._save(await r.json());
+      try { localStorage.setItem("thriftin_unlock_until", String(Date.now() + UNLOCK_DAYS * 86400000)); } catch {}
+      return true;
+    } catch { return false; }
+  },
+  async _refresh(rt) {
+    try {
+      const r = await fetch(SUPABASE_URL + "/auth/v1/token?grant_type=refresh_token", { method: "POST", headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: rt }) });
+      if (!r.ok) { auth.signOut(); return false; }
+      auth._save(await r.json());
+      return true;
+    } catch { return false; }
+  },
+  _save(d) {
+    ACCESS_TOKEN = d.access_token || null;
+    const expires_at = d.expires_at || (Math.floor(Date.now() / 1000) + (d.expires_in || 3600));
+    try { localStorage.setItem("thriftin_session", JSON.stringify({ access_token: d.access_token, refresh_token: d.refresh_token, expires_at })); } catch {}
+  },
+  signOut() {
+    ACCESS_TOKEN = null;
+    try { localStorage.removeItem("thriftin_session"); localStorage.removeItem("thriftin_unlock_until"); } catch {}
+  },
 };
 
 const SZ_CLOTH = ["XS","S","M","L","XL","XXL"];
@@ -155,23 +210,23 @@ async function compressPhoto(file, maxW = 1200, q = 0.8) {
 const api = {
   get: async (table, params = "") => { const r = await fetch(sb.url + "/" + table + "?select=*" + params, { headers: sb.h }); return r.ok ? r.json() : []; },
   post: async (table, body) => { const r = await fetch(sb.url + "/" + table, { method: "POST", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Save failed (" + r.status + "): " + txt.slice(0, 200)); } return (await r.json())[0]; },
-  patch: async (table, id, body) => { const r = await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "PATCH", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); return r.ok ? (await r.json())[0] : null; },
-  del: async (table, id) => { await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "DELETE", headers: sb.h }); },
+  patch: async (table, id, body) => { const r = await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "PATCH", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Update failed (" + r.status + "): " + txt.slice(0, 200)); } return (await r.json())[0]; },
+  del: async (table, id) => { const r = await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "DELETE", headers: sb.h }); if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Delete failed (" + r.status + "): " + txt.slice(0, 200)); } },
   upload: async (blob) => {
     const fn = "p_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8) + ".jpg";
-    const r = await fetch(sb.sto + "/photos/" + fn, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY, "Content-Type": "image/jpeg" }, body: blob });
-    return r.ok ? SUPABASE_URL + "/storage/v1/object/public/photos/" + fn : null;
+    const r = await fetch(sb.sto + "/photos/" + fn, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + (ACCESS_TOKEN || SUPABASE_KEY), "Content-Type": "image/jpeg" }, body: blob });
+    if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Photo upload failed (" + r.status + "): " + txt.slice(0, 200)); }
+    return SUPABASE_URL + "/storage/v1/object/public/photos/" + fn;
   },
   // Generate next unique barcode by counting existing inventory rows + finding max
   nextBarcode: async () => {
     const r = await fetch(sb.url + "/inventory?select=barcode&order=barcode.desc&limit=1", { headers: sb.h });
+    if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Could not generate barcode (" + r.status + "): " + txt.slice(0, 200)); }
     let next = 1;
-    if (r.ok) {
-      const rows = await r.json();
-      if (rows.length && rows[0].barcode) {
-        const m = rows[0].barcode.match(/THR-(\d+)/);
-        if (m) next = parseInt(m[1], 10) + 1;
-      }
+    const rows = await r.json();
+    if (rows.length && rows[0].barcode) {
+      const m = rows[0].barcode.match(/THR-(\d+)/);
+      if (m) next = parseInt(m[1], 10) + 1;
     }
     return "THR-" + String(next).padStart(6, "0");
   },
@@ -233,6 +288,168 @@ function formatDenimSize(w, l) {
 }
 
 // ── Root ──
+// ── Best brand guess for one sale: explicit brand field, else from the description ──
+function saleBrand(s) {
+  const b = (s.brand || "").trim();
+  if (b) return b;
+  const e = extractBrands([s.comment]);
+  return e.length ? e[0][0] : null;
+}
+
+// ── Admin-only sell-through report: what sold, by category & brand, with thumbnails ──
+function ReportScreen({ sales, cats, onClose }) {
+  const [period, setPeriod] = useState("week");
+  const [openCat, setOpenCat] = useState(null);
+  const [zoom, setZoom] = useState("");
+
+  const PERIODS = [["week", "This week", 7], ["30", "30 days", 30], ["90", "3 months", 90], ["180", "6 months", 180], ["all", "All time", 100000]];
+  const days = (PERIODS.find(p => p[0] === period) || PERIODS[0])[2];
+  const kr = n => Math.round(n).toLocaleString("sv-SE") + " kr";
+
+  const stats = useMemo(() => {
+    const today = new Date(); today.setHours(23, 59, 59, 999);
+    const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - days + 1);
+    const prevStart = new Date(start); prevStart.setDate(prevStart.getDate() - days);
+    const dateOf = s => { const d = new Date((s.sold_at || "").slice(0, 10)); return isNaN(d) ? null : d; };
+    const num = x => { const n = parseFloat(x); return isNaN(n) ? 0 : n; };
+    const rev = arr => arr.reduce((t, s) => t + num(s.price), 0);
+
+    const cur = sales.filter(s => { const d = dateOf(s); return d && d >= start && d <= today; });
+    const prev = sales.filter(s => { const d = dateOf(s); return d && d >= prevStart && d < start; });
+    const curRev = rev(cur), prevRev = rev(prev);
+
+    const byCat = {};
+    cur.forEach(s => { const c = (s.category_name || "Uncategorised"); (byCat[c] = byCat[c] || []).push(s); });
+    const catRows = Object.entries(byCat).map(([name, items]) => {
+      const bm = {};
+      items.forEach(s => { const b = saleBrand(s) || "Unbranded"; (bm[b] = bm[b] || []).push(s); });
+      const brands = Object.entries(bm).map(([b, its]) => ({ brand: b, count: its.length, avg: rev(its) / its.length })).sort((a, b) => b.count - a.count);
+      return { name, items, count: items.length, revenue: rev(items), avg: rev(items) / items.length, brands };
+    }).sort((a, b) => b.count - a.count);
+
+    const bAll = {};
+    cur.forEach(s => { const b = saleBrand(s); if (!b) return; (bAll[b] = bAll[b] || []).push(s); });
+    const topBrands = Object.entries(bAll).map(([b, its]) => ({ brand: b, count: its.length, avg: rev(its) / its.length })).sort((a, b) => b.count - a.count).slice(0, 10);
+
+    return { cur, curRev, prevRev, avg: cur.length ? curRev / cur.length : 0, delta: prevRev ? Math.round((curRev - prevRev) / prevRev * 100) : null, catRows, topBrands };
+  }, [sales, days]);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: BG, zIndex: 600, overflowY: "auto" }}>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 60px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>Sell-through</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 26, color: "#aaa", cursor: "pointer" }}>{"×"}</button>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 16, paddingBottom: 2 }}>
+          {PERIODS.map(([k, label]) => (
+            <button key={k} onClick={() => { setPeriod(k); setOpenCat(null); }} style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 20, border: "1px solid " + (period === k ? DARK : BORDER), background: period === k ? DARK : CARD, color: period === k ? "#fff" : DARK, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: stats.delta !== null ? 6 : 22 }}>
+          {[["Items sold", String(stats.cur.length)], ["Revenue", kr(stats.curRev)], ["Avg / item", stats.cur.length ? kr(stats.avg) : "—"]].map(([l, v]) => (
+            <div key={l} style={{ flex: 1, background: CARD, border: "1px solid " + BORDER, borderRadius: 12, padding: "12px 10px", textAlign: "center" }}>
+              <div style={{ fontSize: 17, fontWeight: 800 }}>{v}</div>
+              <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 3 }}>{l}</div>
+            </div>
+          ))}
+        </div>
+        {stats.delta !== null && (
+          <div style={{ fontSize: 13, color: stats.delta >= 0 ? "#06A77D" : "#c33", fontWeight: 600, marginBottom: 22 }}>
+            {stats.delta >= 0 ? "▲" : "▼"} {Math.abs(stats.delta)}% revenue vs the previous {days <= 7 ? "week" : "period"}
+          </div>
+        )}
+
+        {stats.topBrands.length > 0 && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>Top sellers</div>
+            <div style={{ background: CARD, border: "1px solid " + BORDER, borderRadius: 12, padding: "2px 14px", marginBottom: 26 }}>
+              {stats.topBrands.map((b, i) => (
+                <div key={b.brand} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < stats.topBrands.length - 1 ? "1px solid " + BG : "none", fontSize: 14 }}>
+                  <span style={{ fontWeight: 600 }}>{i + 1}. {b.brand}</span>
+                  <span style={{ color: MUTED, fontSize: 13 }}>{b.count} sold · {kr(b.avg)} avg</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>Top types of items — tap for brands</div>
+        {stats.catRows.length === 0 && <div style={{ color: MUTED, fontSize: 13, marginBottom: 20 }}>Nothing sold in this period.</div>}
+        {stats.catRows.map(c => (
+          <div key={c.name} style={{ background: CARD, border: "1px solid " + BORDER, borderRadius: 12, marginBottom: 8, overflow: "hidden" }}>
+            <button onClick={() => setOpenCat(openCat === c.name ? null : c.name)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>{c.name}</div>
+                <div style={{ fontSize: 12, color: MUTED, marginTop: 2 }}>{c.count} sold · {kr(c.revenue)} · {kr(c.avg)} avg</div>
+              </div>
+              <span style={{ fontSize: 18, color: "#bbb", transform: openCat === c.name ? "rotate(90deg)" : "none", transition: "transform .15s" }}>{"›"}</span>
+            </button>
+            {openCat === c.name && (
+              <div style={{ padding: "0 14px 14px" }}>
+                {c.brands.map(b => (
+                  <div key={b.brand} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid " + BG, fontSize: 13 }}>
+                    <span style={{ fontWeight: 600 }}>{b.brand}</span>
+                    <span style={{ color: MUTED }}>{b.count} sold · {kr(b.avg)} avg</span>
+                  </div>
+                ))}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+                  {c.items.filter(s => s.photo_url).map(s => (
+                    <img key={s.id} src={s.photo_url} alt="" onClick={() => setZoom(s.photo_url)} style={{ width: 54, height: 54, objectFit: "cover", borderRadius: 8, cursor: "pointer", background: "#eee" }} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+
+        {stats.cur.some(s => s.photo_url) && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", margin: "26px 0 10px" }}>Everything sold ({stats.cur.length})</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+              {stats.cur.filter(s => s.photo_url).map(s => (
+                <img key={s.id} src={s.photo_url} alt="" onClick={() => setZoom(s.photo_url)} style={{ width: "100%", aspectRatio: "1", objectFit: "cover", borderRadius: 8, cursor: "pointer", background: "#eee" }} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+      {zoom && <PhotoZoom url={zoom} onClose={() => setZoom("")} />}
+    </div>
+  );
+}
+
+// ── PIN unlock screen ──
+function PinGate({ onUnlock }) {
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    if (busy || !pin) return;
+    setBusy(true); setErr("");
+    const ok = await onUnlock(pin);
+    if (!ok) { setErr("Wrong PIN — try again."); setPin(""); setBusy(false); }
+    // on success the app re-renders past this gate, so no reset needed
+  };
+  return (
+    <div style={{ ...S.page, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 24, boxSizing: "border-box" }}>
+      <Logo size={42} />
+      <div style={{ fontSize: 15, fontWeight: 600, color: MUTED, margin: "20px 0 24px" }}>Enter staff PIN to unlock</div>
+      <input
+        type="password" inputMode="numeric" autoFocus value={pin}
+        onChange={e => setPin(e.target.value.replace(/\D/g, ""))}
+        onKeyDown={e => { if (e.key === "Enter") submit(); }}
+        placeholder="••••••"
+        style={{ ...S.field, maxWidth: 240, textAlign: "center", fontSize: 24, letterSpacing: 8, marginBottom: 14 }}
+      />
+      {err && <div style={{ color: "#c33", fontSize: 13, fontWeight: 600, marginBottom: 14 }}>{err}</div>}
+      <button onClick={submit} disabled={busy || !pin} style={{ ...S.btn(!!pin && !busy), maxWidth: 240, opacity: (busy || !pin) ? 0.6 : 1 }}>{busy ? "Checking…" : "Unlock"}</button>
+    </div>
+  );
+}
+
 export default function App() {
   const [users, setUsers] = useState([]);
   const [cats, setCats] = useState([]);
@@ -247,13 +464,30 @@ export default function App() {
   const [showPicker, setShowPicker] = useState(true);
   const [toast, setToast] = useState("");
   const [showAdmin, setShowAdmin] = useState(false);
+  const [showReport, setShowReport] = useState(false);
   const [adminMode, setAdminMode] = useState(false);
+  const [authed, setAuthed] = useState(!REQUIRE_PIN);
+  const [authReady, setAuthReady] = useState(!REQUIRE_PIN);
   const logoTaps = useRef(0);
   const logoTimer = useRef(null);
 
   useEffect(() => { try { localStorage.setItem("thriftin_tab", tab); } catch {} }, [tab]);
 
+  // On open: try to restore a remembered unlock (no PIN if still within the window).
   useEffect(() => {
+    if (!REQUIRE_PIN) return;
+    (async () => { const ok = await auth.restore(); setAuthed(ok); setAuthReady(true); })();
+  }, []);
+
+  // Keep the session alive while unlocked (refresh every 45 min).
+  useEffect(() => {
+    if (!REQUIRE_PIN || !authed) return;
+    const id = setInterval(() => { try { const raw = localStorage.getItem("thriftin_session"); if (raw) { const s = JSON.parse(raw); if (s.refresh_token) auth._refresh(s.refresh_token); } } catch {} }, 2700000);
+    return () => clearInterval(id);
+  }, [authed]);
+
+  useEffect(() => {
+    if (REQUIRE_PIN && !authed) return;
     (async () => {
       try {
         const [u, c, s, inv, br] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc"), api.get("brands", "&order=name")]);
@@ -263,7 +497,7 @@ export default function App() {
       } catch {}
       setLoading(false);
     })();
-  }, []);
+  }, [authed]);
 
   const refresh = async () => {
     const [u, c, s, inv, br] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc"), api.get("brands", "&order=name")]);
@@ -281,6 +515,9 @@ export default function App() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2200); };
 
+  if (REQUIRE_PIN && !authReady) return <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><Logo size={36} /></div>;
+  if (REQUIRE_PIN && !authed) return <PinGate onUnlock={async (pin) => { const ok = await auth.signIn(pin); if (ok) setAuthed(true); return ok; }} />;
+
   if (loading) return <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}><Logo size={36} /><div style={{ color: MUTED, fontSize: 13, marginTop: 12 }}>Loading...</div></div>;
 
   if (showPicker || !currentUser) {
@@ -294,7 +531,8 @@ export default function App() {
   return (
     <div style={S.page}>
       {toast && <Toast msg={toast} />}
-      {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} />}
+      {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setShowReport(true); }} />}
+      {showReport && <ReportScreen sales={sales} cats={cats} onClose={() => setShowReport(false)} />}
 
       <div style={{ padding: "16px 20px 12px", background: CARD, borderBottom: "1px solid " + BORDER, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
         <div onClick={handleLogoTap} style={{ cursor: "default", display: "flex", alignItems: "baseline", gap: 6 }}><Logo size={24} /><span style={{ fontSize: 9, color: "#ccc" }}>v2</span></div>
@@ -788,7 +1026,7 @@ function UserHoursConfig({ user, onChanged }) {
   );
 }
 
-function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged }) {
+function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged, onOpenReport }) {
   const [confirm, setConfirm] = useState(null);
 
   const removeUser = async (id) => { await api.del("users", id); await onChanged(); setConfirm(null); };
@@ -814,6 +1052,11 @@ function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged 
             </button>
           </div>
         </div>
+
+        <button onClick={onOpenReport} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", background: DARK, border: "none", borderRadius: 12, marginBottom: 22, cursor: "pointer", fontFamily: "inherit" }}>
+          <span style={{ color: "#fff", fontSize: 14, fontWeight: 700 }}>{"📊"} Sell-through report</span>
+          <span style={{ color: "#fff", fontSize: 18 }}>{"›"}</span>
+        </button>
 
         <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 }}>Staff members</div>
         {users.map(u => (
@@ -1065,21 +1308,28 @@ function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdde
     e.target.value = "";
   };
 
+  const [err, setErr] = useState("");
+
   const save = async () => {
     if (busy) return;
-    setBusy(true);
-    let photo_url = null;
-    if (photo) photo_url = await api.upload(photo.blob);
-    await api.post("sales", {
-      user_id: currentUser.id, user_name: currentUser.name,
-      category_id: catId || null, category_name: cat?.name || null,
-      size: size || null, comment: comment.trim() || null, brand: brand || null,
-      sleeve: isShirtCat(cat) ? (sleeve || null) : null,
-      price: price ? parseFloat(price) : null, photo_url,
-    });
-    setBusy(false);
-    setPhoto(null); setCatId(""); setSize(""); setComment(""); setPrice(""); setBrand(""); setSleeve("");
-    onSaved();
+    setBusy(true); setErr("");
+    try {
+      let photo_url = null;
+      if (photo) photo_url = await api.upload(photo.blob);
+      await api.post("sales", {
+        user_id: currentUser.id, user_name: currentUser.name,
+        category_id: catId || null, category_name: cat?.name || null,
+        size: size || null, comment: comment.trim() || null, brand: brand || null,
+        sleeve: isShirtCat(cat) ? (sleeve || null) : null,
+        price: price ? parseFloat(price) : null, photo_url,
+      });
+      setPhoto(null); setCatId(""); setSize(""); setComment(""); setPrice(""); setBrand(""); setSleeve("");
+      onSaved();
+    } catch (e) {
+      setErr(e.message || "Could not log the sale. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const addCat = async (name, sizeType) => {
@@ -1154,6 +1404,8 @@ function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdde
         <label style={S.label}>Price <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: "#ccc" }}>(optional)</span></label>
         <input type="number" inputMode="numeric" value={price} onChange={e => setPrice(e.target.value)} style={S.field} />
       </div>
+
+      {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", color: "#A33", borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 12 }}>{err}</div>}
 
       <button onClick={save} disabled={busy} style={{ ...S.btn(!busy), marginBottom: 16, opacity: busy ? 0.6 : 1 }}>
         {busy ? "Saving..." : "Log sale"}
@@ -1832,14 +2084,22 @@ function EditModal({ sale, cats, users, adminMode, onSave, onClose, onCatAdded }
 
   const removePhoto = () => { if (sale.photo_url && !photoChanged) setCPD(true); else { setPhoto(null); setPC(true); } };
 
+  const [err, setErr] = useState("");
+
   const save = async () => {
-    setBusy(true);
-    let photo_url = sale.photo_url;
-    if (photoChanged) photo_url = photo?.blob ? await api.upload(photo.blob) : null;
-    const u = users.find(x => x.id === userId);
-    const patch = { photo_url, category_id: catId || null, category_name: cat?.name || null, size: size || null, comment: comment.trim() || null, price: price ? parseFloat(price) : null, user_id: userId || null, user_name: u?.name || null };
-    if (adminMode && soldDate) patch.sold_at = soldDate;
-    await onSave(patch);
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      let photo_url = sale.photo_url;
+      if (photoChanged) photo_url = photo?.blob ? await api.upload(photo.blob) : null;
+      const u = users.find(x => x.id === userId);
+      const patch = { photo_url, category_id: catId || null, category_name: cat?.name || null, size: size || null, comment: comment.trim() || null, price: price ? parseFloat(price) : null, user_id: userId || null, user_name: u?.name || null };
+      if (adminMode && soldDate) patch.sold_at = soldDate;
+      await onSave(patch);
+    } catch (e) {
+      setBusy(false);
+      setErr(e.message || "Could not save changes. Check your connection and try again.");
+    }
   };
 
   const addCat = async (name, sizeType) => {
@@ -1928,6 +2188,8 @@ function EditModal({ sale, cats, users, adminMode, onSave, onClose, onCatAdded }
           </>
         )}
 
+        {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", color: "#A33", borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 12 }}>{err}</div>}
+
         <button onClick={save} disabled={busy} style={{ ...S.btn(!busy), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving..." : "Save changes"}</button>
       </div>
     </div>
@@ -2012,8 +2274,9 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
 
   // Mark as sold: also creates a sale entry so it flows into History
   const markSold = async (item) => {
+    let sale = null;
     try {
-      const sale = await api.post("sales", {
+      sale = await api.post("sales", {
         user_id: currentUser.id, user_name: currentUser.name,
         category_id: item.category_id, category_name: item.category_name,
         size: item.size, comment: item.comment, gender: item.gender || null, brand: item.brand || null,
@@ -2026,16 +2289,26 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
       await onChanged();
       showToast("Marked sold");
     } catch (e) {
-      showToast("Could not mark sold: " + (e.message || "error"));
+      // Compensating undo: if the sale row was created but flipping the item to
+      // "sold" failed, delete that sale so we never leave a recorded sale on an
+      // item that is still in stock (which could then be sold a second time).
+      if (sale?.id) { try { await api.del("sales", sale.id); } catch {} }
+      await onChanged();
+      showToast("Could not mark sold — nothing saved: " + (e.message || "error"));
     }
   };
 
   // Revert sold → in_stock, and remove the linked sale entry
   const revertSold = async (item) => {
-    if (item.sold_sale_id) { await api.del("sales", item.sold_sale_id); }
-    await api.patch("inventory", item.id, { status: "in_stock", sold_at: null, sold_sale_id: null });
-    await onChanged();
-    showToast("Back in stock");
+    try {
+      if (item.sold_sale_id) { await api.del("sales", item.sold_sale_id); }
+      await api.patch("inventory", item.id, { status: "in_stock", sold_at: null, sold_sale_id: null });
+      await onChanged();
+      showToast("Back in stock");
+    } catch (e) {
+      await onChanged();
+      showToast("Revert failed — check the item: " + (e.message || "error"));
+    }
   };
 
   // Admin: permanently delete an inventory item (and its linked sale if any)
