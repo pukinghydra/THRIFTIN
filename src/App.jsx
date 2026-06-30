@@ -66,6 +66,32 @@ const auth = {
   },
 };
 
+// ── Auto-update ───────────────────────────────────────────────────────────────
+// iOS home-screen web-apps cache aggressively and keep running OLD code after a
+// deploy. We record the JS bundle this app booted with, then check the live page
+// for a newer one and refresh — so the icon never runs stale code.
+const BOOT_ASSETS = (() => {
+  try { return (document.documentElement.innerHTML.match(/assets\/[A-Za-z0-9._-]+\.js/g) || []).sort().join(","); }
+  catch { return ""; }
+})();
+async function isStale() {
+  try {
+    const r = await fetch((location.pathname || "/") + "?_v=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) return false;
+    const sig = ((await r.text()).match(/assets\/[A-Za-z0-9._-]+\.js/g) || []).sort().join(",");
+    return !!sig && !!BOOT_ASSETS && sig !== BOOT_ASSETS;
+  } catch { return false; }
+}
+// Reload, but never more than once a minute — hard guard against any reload loop.
+function safeReload() {
+  try {
+    const last = +sessionStorage.getItem("thriftin_reloaded_at") || 0;
+    if (Date.now() - last < 60000) return;
+    sessionStorage.setItem("thriftin_reloaded_at", String(Date.now()));
+  } catch {}
+  location.reload();
+}
+
 const SZ_CLOTH = ["XS","S","M","L","XL","XXL"];
 const SZ_FOOT  = ["34","35","36","37","38","39","40","41","42","43","44","45","46","47"];
 const SZ_ONE   = ["One Size"];
@@ -83,7 +109,7 @@ const DARK = "#1A1A1A";
 // ── Brand aliases for normalization ──
 const BRAND_ALIASES = {
   "rl": "Ralph Lauren", "ralph": "Ralph Lauren", "polo": "Ralph Lauren",
-  "ysl": "Saint Laurent", "saint": "Saint Laurent", "laurent": "Saint Laurent",
+  "ysl": "YSL", "saint": "YSL", "laurent": "YSL", "yves": "YSL",
   "acne": "Acne Studios", "studios": "Acne Studios",
   "ck": "Calvin Klein", "calvin": "Calvin Klein",
   "th": "Tommy Hilfiger", "tommy": "Tommy Hilfiger", "hilfiger": "Tommy Hilfiger",
@@ -288,12 +314,20 @@ function formatDenimSize(w, l) {
 }
 
 // ── Root ──
+// ── YSL and Saint Laurent are the same brand → always treat/show as "YSL" ──
+function normalizeBrand(name) {
+  if (!name) return name;
+  const k = name.trim().toLowerCase();
+  if (["ysl", "saint laurent", "saint-laurent", "yves saint laurent", "yves saint-laurent"].includes(k)) return "YSL";
+  return name.trim();
+}
+
 // ── Best brand guess for one sale: explicit brand field, else from the description ──
 function saleBrand(s) {
   const b = (s.brand || "").trim();
-  if (b) return b;
+  if (b) return normalizeBrand(b);
   const e = extractBrands([s.comment]);
-  return e.length ? e[0][0] : null;
+  return e.length ? normalizeBrand(e[0][0]) : null;
 }
 
 // ── Admin-only sell-through report: what sold, by category & brand, with thumbnails ──
@@ -465,6 +499,7 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [showAdmin, setShowAdmin] = useState(false);
   const [showReport, setShowReport] = useState(false);
+  const [updateReady, setUpdateReady] = useState(false);
   const [adminMode, setAdminMode] = useState(false);
   const [authed, setAuthed] = useState(!REQUIRE_PIN);
   const [authReady, setAuthReady] = useState(!REQUIRE_PIN);
@@ -472,6 +507,16 @@ export default function App() {
   const logoTimer = useRef(null);
 
   useEffect(() => { try { localStorage.setItem("thriftin_tab", tab); } catch {} }, [tab]);
+
+  // Auto-update: refresh if a newer version has been deployed (on open + periodically).
+  useEffect(() => {
+    let stop = false;
+    isStale().then(s => { if (s && !stop) safeReload(); });
+    const onShow = async () => { if (document.visibilityState === "visible" && !stop && await isStale()) safeReload(); };
+    document.addEventListener("visibilitychange", onShow);
+    const id = setInterval(async () => { if (!stop && await isStale()) setUpdateReady(true); }, 600000);
+    return () => { stop = true; document.removeEventListener("visibilitychange", onShow); clearInterval(id); };
+  }, []);
 
   // On open: try to restore a remembered unlock (no PIN if still within the window).
   useEffect(() => {
@@ -531,6 +576,7 @@ export default function App() {
   return (
     <div style={S.page}>
       {toast && <Toast msg={toast} />}
+      {updateReady && <div onClick={() => location.reload()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 78, zIndex: 9000, background: DARK, color: "#fff", borderRadius: 20, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)" }}>{"↻"} Update available — tap to refresh</div>}
       {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setShowReport(true); }} />}
       {showReport && <ReportScreen sales={sales} cats={cats} onClose={() => setShowReport(false)} />}
 
@@ -553,7 +599,7 @@ export default function App() {
           <HistoryScreen sales={sales} cats={cats} users={users} adminMode={adminMode} onChanged={refresh} onCatAdded={refresh} />
         </div>
         <div style={{ display: tab === "shifts" ? "block" : "none" }}>
-          <ShiftsScreen users={users} currentUser={currentUser} adminMode={adminMode} />
+          <ShiftsScreen users={users} currentUser={currentUser} adminMode={adminMode} active={tab === "shifts"} />
         </div>
         <div style={{ display: tab === "stock" ? "block" : "none" }}>
           <StockScreen inventory={inventory} cats={cats} brands={brands} currentUser={currentUser} adminMode={adminMode} onChanged={refresh} onCatAdded={refresh} onBrandAdded={refresh} showToast={showToast} />
@@ -643,7 +689,7 @@ function HoursStepper({ value, onChange }) {
   );
 }
 
-function ShiftsScreen({ users, currentUser, adminMode }) {
+function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const [shifts, setShifts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -660,6 +706,16 @@ function ShiftsScreen({ users, currentUser, adminMode }) {
     catch (e) { setErr(e.message || "Could not load schedule"); }
   }, []);
   useEffect(() => { (async () => { await load(); setLoading(false); })(); }, [load]);
+
+  // Keep the schedule fresh: reload when the tab is opened or the app regains focus,
+  // so two devices/views don't drift out of sync (there's no live sync otherwise).
+  useEffect(() => { if (active) load(); }, [active, load]);
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState !== "hidden") load(); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, [load]);
 
   const today = dateToStr(new Date());
   const me = users.find(u => u.id === currentUser.id) || currentUser;
@@ -1190,10 +1246,10 @@ function BrandPicker({ brands, value, onChange, onBrandAdded }) {
   const matches = ql ? brands.filter(b => b.name.toLowerCase().includes(ql)) : brands;
   const exact = brands.some(b => b.name.toLowerCase() === ql);
 
-  const pick = (name) => { onChange(name); setQ(""); setOpen(false); };
+  const pick = (name) => { onChange(normalizeBrand(name)); setQ(""); setOpen(false); };
 
   const addNew = async () => {
-    const name = q.trim();
+    const name = normalizeBrand(q.trim());
     if (!name) return;
     setAdding(true);
     try {
