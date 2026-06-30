@@ -700,6 +700,8 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const [editDay, setEditDay] = useState(null);
   const [copied, setCopied] = useState(false);
   const [moveSource, setMoveSource] = useState(null);
+  const [payOff, setPayOff] = useState(0);
+  const [payCopied, setPayCopied] = useState(false);
 
   const load = useCallback(async () => {
     try { const s = await api.get("shifts", "&order=date.desc"); setShifts(s); }
@@ -861,6 +863,30 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   };
   const copyExport = async () => { try { await navigator.clipboard.writeText(buildExport()); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {} };
 
+  // ── Payroll / accountant export: the 25th cycle, ALL hours-tracking staff, planned hours included ──
+  // Cycle ends on the 25th (paid that day); the next begins the 26th — no day counted twice.
+  const payNow = new Date();
+  let _pm = payNow.getMonth(), _py = payNow.getFullYear();
+  if (payNow.getDate() > 25) _pm += 1;                 // default to the upcoming payday
+  _pm += payOff;
+  const payEnd = new Date(_py, _pm, 25);               // payday — the 25th
+  const payStart = new Date(_py, _pm - 1, 26);         // day after the previous payday
+  const payStartStr = dateToStr(payStart), payEndStr = dateToStr(payEnd);
+  const fmtShort = d => d.getDate() + " " + MO_SHORT[d.getMonth()];
+  const payStaff = users.filter(u => u.tracks_hours).map(u => {
+    const us = shifts.filter(s => s.user_id === u.id && s.date >= payStartStr && s.date <= payEndStr && s.status !== "off" && s.hours != null)
+      .sort((a, b) => a.date < b.date ? -1 : 1);
+    return { u, us, total: us.reduce((t, s) => t + hoursNum(s.hours), 0), planned: us.filter(s => s.status !== "worked").length };
+  });
+  const copyPayroll = async () => {
+    let out = "Hours — paid " + fmtShort(payEnd) + " " + payEnd.getFullYear() + "  (" + fmtShort(payStart) + " – " + fmtShort(payEnd) + ")\n";
+    payStaff.forEach(({ u, us, total }) => {
+      out += "\n" + u.name + " — " + total + " h\n";
+      us.forEach(s => { out += "  " + fmtDay(s.date) + "  " + s.hours + "h" + (s.status !== "worked" ? " (planned)" : "") + "\n"; });
+    });
+    try { await navigator.clipboard.writeText(out); setPayCopied(true); setTimeout(() => setPayCopied(false), 1500); } catch {}
+  };
+
   const applyBaseline = async () => {
     if (!adminUser || !adminUser.hours_template) { setErr("No baseline set. Set " + (adminUser ? adminUser.name : "this person") + "'s weekly hours in Admin first."); return; }
     setErr("");
@@ -902,6 +928,26 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
       {adminMode && adminUser && (
         <div style={{ marginTop:28, marginBottom:24 }}>
           <div style={{ fontSize:10, fontWeight:800, color:"#c33", letterSpacing:1.2, marginBottom:12 }}>ADMIN {"\u2014"} SCHEDULE</div>
+
+          {/* Payroll / accountant export \u2014 all hours-tracking staff, 25th cycle, planned hours included */}
+          <div style={{ ...S.card, marginBottom:16 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+              <button onClick={() => setPayOff(payOff - 1)} style={{ ...stepBtn, width:40 }}>{"\u2039"}</button>
+              <div style={{ textAlign:"center" }}>
+                <div style={{ fontSize:14, fontWeight:800 }}>Payroll {"\u2014"} paid {fmtShort(payEnd)} {payEnd.getFullYear()}</div>
+                <div style={{ fontSize:11, color:MUTED }}>{fmtShort(payStart)} {"\u2013"} {fmtShort(payEnd)} {"\u00b7"} incl. planned</div>
+              </div>
+              <button onClick={() => setPayOff(payOff + 1)} style={{ ...stepBtn, width:40 }}>{"\u203a"}</button>
+            </div>
+            {payStaff.every(p => p.us.length === 0) && <div style={{ fontSize:13, color:MUTED, padding:"6px 0" }}>No hours in this period yet.</div>}
+            {payStaff.map(({ u, total, planned }) => (
+              <div key={u.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", borderTop:"1px solid "+BG, fontSize:14 }}>
+                <span style={{ fontWeight:600 }}>{u.name}</span>
+                <span style={{ fontWeight:700 }}>{total}h{planned > 0 ? <span style={{ color:"#C58A1F", fontSize:11, fontWeight:600 }}>{"  \u00b7 "}{planned} planned</span> : null}</span>
+              </div>
+            ))}
+            <button onClick={copyPayroll} style={{ width:"100%", marginTop:12, padding:"12px", background:DARK, border:"none", borderRadius:10, color:"#fff", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>{payCopied ? "Copied \u2713" : "Copy for accountant"}</button>
+          </div>
 
           <div style={{ display:"flex", gap:8, overflowX:"auto", paddingBottom:8, marginBottom:14 }}>
             {users.map(u => (
