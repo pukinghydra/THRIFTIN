@@ -120,7 +120,7 @@ const BRAND_ALIASES = {
   "burberry": "Burberry",
   "nike": "Nike",
   "adidas": "Adidas",
-  "levis": "Levi's", "levi's": "Levi's", "levi": "Levi's",
+  "levis": "Levis", "levi's": "Levis", "levi": "Levis",
   "carhartt": "Carhartt",
   "dickies": "Dickies",
   "lacoste": "Lacoste",
@@ -314,11 +314,12 @@ function formatDenimSize(w, l) {
 }
 
 // ── Root ──
-// ── YSL and Saint Laurent are the same brand → always treat/show as "YSL" ──
+// ── Brand aliasing: YSL/Saint Laurent → "YSL"; Levi's/Levis (any apostrophe) → "Levis" ──
 function normalizeBrand(name) {
   if (!name) return name;
   const k = name.trim().toLowerCase();
   if (["ysl", "saint laurent", "saint-laurent", "yves saint laurent", "yves saint-laurent"].includes(k)) return "YSL";
+  if (["levi's", "levis", "levi’s", "levi´s", "levi", "levi strauss", "levi strauss & co", "levi strauss & co."].includes(k)) return "Levis";
   return name.trim();
 }
 
@@ -330,26 +331,54 @@ function saleBrand(s) {
   return e.length ? normalizeBrand(e[0][0]) : null;
 }
 
+// Period options for the Sell-through report: the History advanced-stats calendar
+// presets (Today … Last month) plus the longer rolling trend windows.
+function getReportPeriods() {
+  const cal = getTimePresets().map(p => ({ key: p.label, label: p.label, kind: "cal", from: p.from, to: p.to }));
+  const trend = [["30", "30 days", 30], ["90", "3 months", 90], ["180", "6 months", 180], ["all", "All time", 100000]]
+    .map(([key, label, days]) => ({ key, label, kind: "trend", days }));
+  return [...cal, ...trend];
+}
+
+// Resolve a period key to {start, end, prevStart, prevEnd} Date boundaries.
+// prev* is the equal-length window immediately before, for the ▲/▼ delta.
+function resolveReportRange(key) {
+  const DAY = 86400000;
+  const all = getReportPeriods();
+  const p = all.find(x => x.key === key) || all[0];
+  if (p.kind === "cal") {
+    const start = strToDate(p.from); start.setHours(0, 0, 0, 0);
+    const endMid = strToDate(p.to); endMid.setHours(0, 0, 0, 0);
+    const lenDays = Math.round((endMid - start) / DAY) + 1;
+    const end = new Date(endMid); end.setHours(23, 59, 59, 999);
+    const prevEnd = new Date(start.getTime() - 1);
+    const prevStart = new Date(start); prevStart.setDate(prevStart.getDate() - lenDays); prevStart.setHours(0, 0, 0, 0);
+    return { start, end, prevStart, prevEnd };
+  }
+  const end = new Date(); end.setHours(23, 59, 59, 999);
+  const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - p.days + 1);
+  const prevEnd = new Date(start.getTime() - 1);
+  const prevStart = new Date(start); prevStart.setDate(prevStart.getDate() - p.days);
+  return { start, end, prevStart, prevEnd };
+}
+
 // ── Admin-only sell-through report: what sold, by category & brand, with thumbnails ──
-function ReportScreen({ sales, cats, onClose }) {
-  const [period, setPeriod] = useState("week");
+function ReportScreen({ sales, cats, onClose, initialPeriod }) {
+  const [period, setPeriod] = useState(initialPeriod || "This week");
   const [openCat, setOpenCat] = useState(null);
   const [zoom, setZoom] = useState("");
 
-  const PERIODS = [["week", "This week", 7], ["30", "30 days", 30], ["90", "3 months", 90], ["180", "6 months", 180], ["all", "All time", 100000]];
-  const days = (PERIODS.find(p => p[0] === period) || PERIODS[0])[2];
+  const PERIODS = getReportPeriods();
   const kr = n => Math.round(n).toLocaleString("sv-SE") + " kr";
 
   const stats = useMemo(() => {
-    const today = new Date(); today.setHours(23, 59, 59, 999);
-    const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - days + 1);
-    const prevStart = new Date(start); prevStart.setDate(prevStart.getDate() - days);
+    const { start, end, prevStart, prevEnd } = resolveReportRange(period);
     const dateOf = s => { const d = new Date((s.sold_at || "").slice(0, 10)); return isNaN(d) ? null : d; };
     const num = x => { const n = parseFloat(x); return isNaN(n) ? 0 : n; };
     const rev = arr => arr.reduce((t, s) => t + num(s.price), 0);
 
-    const cur = sales.filter(s => { const d = dateOf(s); return d && d >= start && d <= today; });
-    const prev = sales.filter(s => { const d = dateOf(s); return d && d >= prevStart && d < start; });
+    const cur = sales.filter(s => { const d = dateOf(s); return d && d >= start && d <= end; });
+    const prev = sales.filter(s => { const d = dateOf(s); return d && d >= prevStart && d <= prevEnd; });
     const curRev = rev(cur), prevRev = rev(prev);
 
     const byCat = {};
@@ -366,7 +395,7 @@ function ReportScreen({ sales, cats, onClose }) {
     const topBrands = Object.entries(bAll).map(([b, its]) => ({ brand: b, count: its.length, avg: rev(its) / its.length })).sort((a, b) => b.count - a.count).slice(0, 10);
 
     return { cur, curRev, prevRev, avg: cur.length ? curRev / cur.length : 0, delta: prevRev ? Math.round((curRev - prevRev) / prevRev * 100) : null, catRows, topBrands };
-  }, [sales, days]);
+  }, [sales, period]);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: BG, zIndex: 600, overflowY: "auto" }}>
@@ -377,8 +406,8 @@ function ReportScreen({ sales, cats, onClose }) {
         </div>
 
         <div style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 16, paddingBottom: 2 }}>
-          {PERIODS.map(([k, label]) => (
-            <button key={k} onClick={() => { setPeriod(k); setOpenCat(null); }} style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 20, border: "1px solid " + (period === k ? DARK : BORDER), background: period === k ? DARK : CARD, color: period === k ? "#fff" : DARK, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+          {PERIODS.map(p => (
+            <button key={p.key} onClick={() => { setPeriod(p.key); setOpenCat(null); }} style={{ flexShrink: 0, padding: "8px 14px", borderRadius: 20, border: "1px solid " + (period === p.key ? DARK : BORDER), background: period === p.key ? DARK : CARD, color: period === p.key ? "#fff" : DARK, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{p.label}</button>
           ))}
         </div>
 
@@ -392,7 +421,7 @@ function ReportScreen({ sales, cats, onClose }) {
         </div>
         {stats.delta !== null && (
           <div style={{ fontSize: 13, color: stats.delta >= 0 ? "#06A77D" : "#c33", fontWeight: 600, marginBottom: 22 }}>
-            {stats.delta >= 0 ? "▲" : "▼"} {Math.abs(stats.delta)}% revenue vs the previous {days <= 7 ? "week" : "period"}
+            {stats.delta >= 0 ? "▲" : "▼"} {Math.abs(stats.delta)}% revenue vs the previous period
           </div>
         )}
 
@@ -499,6 +528,7 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [showAdmin, setShowAdmin] = useState(false);
   const [showReport, setShowReport] = useState(false);
+  const [reportPeriod, setReportPeriod] = useState(null);
   const [updateReady, setUpdateReady] = useState(false);
   const [adminMode, setAdminMode] = useState(false);
   const [authed, setAuthed] = useState(!REQUIRE_PIN);
@@ -549,6 +579,22 @@ export default function App() {
     setUsers(u); setCats(c); setSales(s); setInventory(inv); setBrands(br);
   };
 
+  // Monday-morning: auto-open the Sell-through report once per Monday, per device
+  // (defaults to "Last week"). Only fires once the app is fully unlocked and ready.
+  useEffect(() => {
+    if (loading || !currentUser) return;
+    if (REQUIRE_PIN && !authed) return;
+    try {
+      const now = new Date();
+      if (now.getDay() !== 1) return; // 1 = Monday
+      const key = now.toISOString().slice(0, 10);
+      if (localStorage.getItem("thriftin_report_monday") === key) return;
+      localStorage.setItem("thriftin_report_monday", key);
+      setReportPeriod("Last week");
+      setShowReport(true);
+    } catch {}
+  }, [loading, currentUser, authed]);
+
   const pickUser = (u) => { setCU(u); setShowPicker(false); try { localStorage.setItem("thriftin_user", u.id); } catch {} };
 
   const handleLogoTap = () => {
@@ -577,8 +623,8 @@ export default function App() {
     <div style={S.page}>
       {toast && <Toast msg={toast} />}
       {updateReady && <div onClick={() => location.reload()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 78, zIndex: 9000, background: DARK, color: "#fff", borderRadius: 20, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)" }}>{"↻"} Update available — tap to refresh</div>}
-      {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setShowReport(true); }} />}
-      {showReport && <ReportScreen sales={sales} cats={cats} onClose={() => setShowReport(false)} />}
+      {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setReportPeriod(null); setShowReport(true); }} />}
+      {showReport && <ReportScreen key={reportPeriod || "manual"} sales={sales} cats={cats} initialPeriod={reportPeriod} onClose={() => { setShowReport(false); setReportPeriod(null); }} />}
 
       <div style={{ padding: "16px 20px 12px", background: CARD, borderBottom: "1px solid " + BORDER, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
         <div onClick={handleLogoTap} style={{ cursor: "default", display: "flex", alignItems: "baseline", gap: 6 }}><Logo size={24} /><span style={{ fontSize: 9, color: "#ccc" }}>v2</span></div>
