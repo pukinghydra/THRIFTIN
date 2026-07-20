@@ -744,7 +744,7 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const [adminUserId, setAdminUserId] = useState(null);
   const [monthOff, setMonthOff] = useState(0);
   const [editDay, setEditDay] = useState(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedId, setCopiedId] = useState(null);
   const [moveSource, setMoveSource] = useState(null);
   const [payOff, setPayOff] = useState(0);
   const [payCopied, setPayCopied] = useState(false);
@@ -901,14 +901,6 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const workedDays = monthShifts.filter(x => x.sh && x.sh.status === "worked").length;
   const pendingPast = monthShifts.filter(x => x.sh && x.sh.status === "scheduled" && x.ds < today);
 
-  const buildExport = () => {
-    let out = adminUser.name + " \u2014 " + MO_LONG[mo] + " " + yr + "\n\n";
-    monthShifts.forEach(x => { if (x.sh && x.sh.status === "worked") out += fmtDay(x.ds) + "  " + x.sh.hours + "h\n"; });
-    out += "\nTotal: " + workedHours + "h  (" + workedDays + " days)";
-    return out;
-  };
-  const copyExport = async () => { try { await navigator.clipboard.writeText(buildExport()); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {} };
-
   // ── Payroll / accountant export: the 25th cycle, ALL hours-tracking staff, planned hours included ──
   // Cycle ends on the 25th (paid that day); the next begins the 26th — no day counted twice.
   const payNow = new Date();
@@ -932,6 +924,17 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
     });
     try { await navigator.clipboard.writeText(out); setPayCopied(true); setTimeout(() => setPayCopied(false), 1500); } catch {}
   };
+
+  // Per-person accountant copy: SAME 25th pay cycle as above, one staff member.
+  const buildOne = (u) => {
+    const row = payStaff.find(p => p.u.id === u.id);
+    const us = row ? row.us : [];
+    let out = u.name + " \u2014 paid " + fmtShort(payEnd) + " " + payEnd.getFullYear() + "  (" + fmtShort(payStart) + " \u2013 " + fmtShort(payEnd) + ")\n";
+    us.forEach(x => { out += "  " + fmtDay(x.date) + "  " + x.hours + "h" + (x.status !== "worked" ? " (planned)" : "") + "\n"; });
+    out += "\nTotal: " + (row ? row.total : 0) + " h  (" + us.length + " days)";
+    return out;
+  };
+  const copyOne = async (u) => { try { await navigator.clipboard.writeText(buildOne(u)); setCopiedId(u.id); setTimeout(() => setCopiedId(null), 1500); } catch {} };
 
   const applyBaseline = async () => {
     if (!adminUser || !adminUser.hours_template) { setErr("No baseline set. Set " + (adminUser ? adminUser.name : "this person") + "'s weekly hours in Admin first."); return; }
@@ -986,13 +989,14 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
               <button onClick={() => setPayOff(payOff + 1)} style={{ ...stepBtn, width:40 }}>{"\u203a"}</button>
             </div>
             {payStaff.every(p => p.us.length === 0) && <div style={{ fontSize:13, color:MUTED, padding:"6px 0" }}>No hours in this period yet.</div>}
-            {payStaff.map(({ u, total, planned }) => (
-              <div key={u.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", borderTop:"1px solid "+BG, fontSize:14 }}>
-                <span style={{ fontWeight:600 }}>{u.name}</span>
+            {payStaff.map(({ u, us, total, planned }) => (
+              <div key={u.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, padding:"8px 0", borderTop:"1px solid "+BG, fontSize:14 }}>
+                <span style={{ fontWeight:600, flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{u.name}</span>
                 <span style={{ fontWeight:700 }}>{total}h{planned > 0 ? <span style={{ color:"#C58A1F", fontSize:11, fontWeight:600 }}>{"  \u00b7 "}{planned} planned</span> : null}</span>
+                <button onClick={() => copyOne(u)} disabled={us.length === 0} style={{ flexShrink:0, padding:"5px 10px", background: us.length ? CARD : BG, border:"1px solid "+BORDER, borderRadius:8, fontSize:12, fontWeight:600, color: us.length ? DARK : MUTED, cursor: us.length ? "pointer" : "default", fontFamily:"inherit" }}>{copiedId === u.id ? "Copied \u2713" : "Copy"}</button>
               </div>
             ))}
-            <button onClick={copyPayroll} style={{ width:"100%", marginTop:12, padding:"12px", background:DARK, border:"none", borderRadius:10, color:"#fff", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>{payCopied ? "Copied \u2713" : "Copy for accountant"}</button>
+            <button onClick={copyPayroll} style={{ width:"100%", marginTop:12, padding:"12px", background:DARK, border:"none", borderRadius:10, color:"#fff", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>{payCopied ? "Copied \u2713" : "Copy all staff"}</button>
           </div>
 
           <div style={{ display:"flex", gap:8, overflowX:"auto", paddingBottom:8, marginBottom:14 }}>
@@ -1010,12 +1014,9 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
           </div>
 
           {adminUser.tracks_hours && (
-            <div style={{ ...S.card, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div>
-                <div style={{ fontSize:22, fontWeight:800 }}>{workedHours}h</div>
-                <div style={{ fontSize:12, color:MUTED }}>{workedDays} days confirmed</div>
-              </div>
-              <button onClick={copyExport} style={{ padding:"12px 16px", background:DARK, border:"none", borderRadius:10, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>{copied ? "Copied \u2713" : "Copy for accountant"}</button>
+            <div style={{ ...S.card }}>
+              <div style={{ fontSize:22, fontWeight:800 }}>{workedHours}h</div>
+              <div style={{ fontSize:12, color:MUTED }}>{workedDays} days confirmed {"\u00b7"} {MO_LONG[mo]} (scheduling view)</div>
             </div>
           )}
 
