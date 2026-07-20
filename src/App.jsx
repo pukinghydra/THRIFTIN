@@ -392,7 +392,7 @@ function ReportScreen({ sales, cats, onClose, initialPeriod }) {
 
     const bAll = {};
     cur.forEach(s => { const b = saleBrand(s); if (!b) return; (bAll[b] = bAll[b] || []).push(s); });
-    const topBrands = Object.entries(bAll).map(([b, its]) => ({ brand: b, count: its.length, avg: rev(its) / its.length })).sort((a, b) => b.count - a.count).slice(0, 10);
+    const topBrands = Object.entries(bAll).map(([b, its]) => ({ brand: b, count: its.length, total: rev(its), avg: rev(its) / its.length })).sort((a, b) => b.count - a.count).slice(0, 10);
 
     return { cur, curRev, prevRev, avg: cur.length ? curRev / cur.length : 0, delta: prevRev ? Math.round((curRev - prevRev) / prevRev * 100) : null, catRows, topBrands };
   }, [sales, period]);
@@ -432,7 +432,7 @@ function ReportScreen({ sales, cats, onClose, initialPeriod }) {
               {stats.topBrands.map((b, i) => (
                 <div key={b.brand} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < stats.topBrands.length - 1 ? "1px solid " + BG : "none", fontSize: 14 }}>
                   <span style={{ fontWeight: 600 }}>{i + 1}. {b.brand}</span>
-                  <span style={{ color: MUTED, fontSize: 13 }}>{b.count} sold · {kr(b.avg)} avg</span>
+                  <span style={{ color: MUTED, fontSize: 13 }}>{b.count} sold · <span style={{ color: DARK, fontWeight: 700 }}>{kr(b.total)}</span> · {kr(b.avg)} avg</span>
                 </div>
               ))}
             </div>
