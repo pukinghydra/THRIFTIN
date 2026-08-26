@@ -235,6 +235,15 @@ async function compressPhoto(file, maxW = 1200, q = 0.8) {
 
 const api = {
   get: async (table, params = "") => { const r = await fetch(sb.url + "/" + table + "?select=*" + params, { headers: sb.h }); return r.ok ? r.json() : []; },
+  // Same read, but throws instead of pretending the table is empty — use it
+  // wherever an empty screen would read as lost data.
+  list: async (table, params = "") => {
+    const r = await fetch(sb.url + "/" + table + "?select=*" + params, { headers: sb.h });
+    if (!r.ok) throw new Error("Could not load " + table + " (" + r.status + ")");
+    const rows = await r.json();
+    if (!Array.isArray(rows)) throw new Error("Could not load " + table);
+    return rows;
+  },
   post: async (table, body) => { const r = await fetch(sb.url + "/" + table, { method: "POST", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Save failed (" + r.status + "): " + txt.slice(0, 200)); } return (await r.json())[0]; },
   patch: async (table, id, body) => { const r = await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "PATCH", headers: { ...sb.h, Prefer: "return=representation" }, body: JSON.stringify(body) }); if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Update failed (" + r.status + "): " + txt.slice(0, 200)); } return (await r.json())[0]; },
   del: async (table, id) => { const r = await fetch(sb.url + "/" + table + "?id=eq." + id, { method: "DELETE", headers: sb.h }); if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Delete failed (" + r.status + "): " + txt.slice(0, 200)); } },
@@ -741,6 +750,7 @@ function HoursStepper({ value, onChange }) {
 function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const [shifts, setShifts] = useState([]);
   const [notes, setNotes] = useState([]);
+  const [loadErr, setLoadErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [adjusting, setAdjusting] = useState(false);
@@ -755,12 +765,17 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const [payOff, setPayOff] = useState(0);
   const [payCopied, setPayCopied] = useState(false);
 
+  // The two reads are independent: a hiccup on one must never blank the other,
+  // and a failed refresh keeps the schedule already on screen rather than
+  // showing an empty month, which reads as lost bookings.
   const load = useCallback(async () => {
-    try {
-      const [s, n] = await Promise.all([api.get("shifts", "&order=date.desc"), api.get("day_notes", "&order=date.asc")]);
-      setShifts(s); setNotes(n);
-    }
-    catch (e) { setErr(e.message || "Could not load schedule"); }
+    const [s, n] = await Promise.allSettled([
+      api.list("shifts", "&order=date.desc"),
+      api.list("day_notes", "&order=date.asc"),
+    ]);
+    if (s.status === "fulfilled") { setShifts(s.value); setLoadErr(""); }
+    else setLoadErr(s.reason && s.reason.message ? s.reason.message : "Could not load the schedule");
+    if (n.status === "fulfilled") setNotes(n.value);
   }, []);
   useEffect(() => { (async () => { await load(); setLoading(false); })(); }, [load]);
 
@@ -992,6 +1007,13 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   return (
     <div style={{ padding:"16px 16px 0" }}>
       {err && <div style={{ background:"#FDECEC", border:"1px solid #F0C0C0", color:"#A33", borderRadius:10, padding:"10px 12px", fontSize:13, marginBottom:12 }}>{err}</div>}
+
+      {loadErr && (
+        <div style={{ background:"#FDECEC", border:"1px solid #F0C0C0", borderRadius:10, padding:"10px 12px", marginBottom:12, display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+          <span style={{ fontSize:13, color:"#A33" }}>{loadErr}. Nothing is lost {"\u2014"} the schedule just could not be fetched.</span>
+          <button onClick={load} style={{ padding:"6px 12px", background:CARD, border:"1px solid #F0C0C0", borderRadius:8, fontSize:12, fontWeight:700, color:"#A33", cursor:"pointer", fontFamily:"inherit", flexShrink:0 }}>Retry</button>
+        </div>
+      )}
 
       <TodayCard />
 
