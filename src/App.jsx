@@ -897,19 +897,25 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const shiftsOn = (ds) => shifts.filter(s => s.date === ds)
     .sort((a, b) => users.findIndex(u => u.id === a.user_id) - users.findIndex(u => u.id === b.user_id));
 
-  const noteOn = (ds) => notes.find(n => n.date === ds);
-  // One free-text note per day ("Richie leaves at 5, Vic steps in"). Empty text deletes it.
-  const saveNote = async (ds, text) => {
+  // One row per day, holding the free-text note and the split-day flag.
+  const noteOn  = (ds) => notes.find(n => n.date === ds);
+  const isSplit = (ds) => { const n = noteOn(ds); return !!(n && n.split_day); };
+
+  // Write both fields at once; a day with neither a note nor a split loses its row.
+  const saveDay = async (ds, patch) => {
     setErr("");
-    const t = (text || "").trim();
     const ex = noteOn(ds);
+    const note  = patch.note !== undefined ? (patch.note || "").trim() : (ex ? ex.note : "");
+    const split = patch.split_day !== undefined ? patch.split_day : (ex ? !!ex.split_day : false);
     try {
-      if (ex && !t) await api.del("day_notes", ex.id);
-      else if (ex) await api.patch("day_notes", ex.id, { note: t, updated_by: currentUser.name, updated_at: new Date().toISOString() });
-      else if (t) await api.post("day_notes", { date: ds, note: t, updated_by: currentUser.name });
+      if (ex && !note && !split) await api.del("day_notes", ex.id);
+      else if (ex) await api.patch("day_notes", ex.id, { note, split_day: split, updated_by: currentUser.name, updated_at: new Date().toISOString() });
+      else if (note || split) await api.post("day_notes", { date: ds, note, split_day: split, updated_by: currentUser.name });
       await load();
-    } catch (e) { setErr(e.message || "Could not save note"); }
+    } catch (e) { setErr(e.message || "Could not save"); }
   };
+  const saveNote   = (ds, text) => saveDay(ds, { note: text });
+  const toggleSplit = (ds) => saveDay(ds, { split_day: !isSplit(ds) });
 
   // Put someone on a day straight from the day popup — hours come from their weekly baseline.
   const addToDay = async (u, ds) => {
@@ -1012,7 +1018,8 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
       )}
 
       <MonthCalendar
-        cells={calCells} shiftsOn={shiftsOn} users={users} today={today} hasNote={ds => !!noteOn(ds)}
+        cells={calCells} shiftsOn={shiftsOn} users={users} today={today}
+        hasNote={ds => { const n = noteOn(ds); return !!(n && n.note && n.note.trim()); }} isSplit={isSplit}
         moveSourceDs={moveSource ? moveSource.ds : null}
         onDayClick={ds => { if (adminMode && moveSource) doMove(ds); else setDayOpen(ds); }}
         onDayLongPress={adminMode ? (ds => setNotesDay(ds)) : null}
@@ -1024,6 +1031,10 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
             <span style={{ width:9, height:9, borderRadius:3, background:u.color || "#888" }} />{u.name}
           </div>
         ))}
+      </div>
+      <div style={{ display:"flex", flexWrap:"wrap", alignItems:"center", gap:12, fontSize:11.5, color:MUTED, paddingBottom:4 }}>
+        <span style={{ display:"flex", alignItems:"center", gap:5 }}><SplitBadge />split day</span>
+        <span style={{ display:"flex", alignItems:"center", gap:5 }}><span style={{ width:6, height:6, borderRadius:"50%", background:"#E8973A" }} />note</span>
       </div>
       <div style={{ fontSize:12, color:MUTED, paddingBottom:4 }}>{adminMode ? "Tap a day to staff it \u00b7 hold a day for notes" : "Tap a day to see who\u2019s working."}</div>
 
@@ -1081,11 +1092,12 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
 
       {dayOpen && (
         <DayPeopleSheet
-          ds={dayOpen} users={users} dayShifts={shiftsOn(dayOpen)} note={noteOn(dayOpen)} admin={adminMode} today={today}
+          ds={dayOpen} users={users} dayShifts={shiftsOn(dayOpen)} note={noteOn(dayOpen)} split={isSplit(dayOpen)} admin={adminMode} today={today}
           onClose={() => setDayOpen(null)}
           onAdd={async (u) => { await addToDay(u, dayOpen); }}
           onEdit={(u) => setEditDay({ ds: dayOpen, user: u })}
           onOpenNotes={() => setNotesDay(dayOpen)}
+          onToggleSplit={async () => { await toggleSplit(dayOpen); }}
         />
       )}
 
@@ -1111,8 +1123,20 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   );
 }
 
+// Marks a day two people share the store on ("split day").
+const SPLIT_COL = "#1D3557";
+function SplitBadge({ size = 13 }) {
+  return (
+    <span style={{
+      display:"inline-flex", alignItems:"center", justifyContent:"center",
+      height:size, minWidth:size, padding:"0 3px", borderRadius:4,
+      background:SPLIT_COL, color:"#fff", fontSize:size - 5, fontWeight:800, lineHeight:1, flexShrink:0,
+    }}>{"\u21C4"}</span>
+  );
+}
+
 // Month grid — the whole team at a glance. Tap a day to staff it, hold it for notes.
-function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPress, moveSourceDs, hasNote }) {
+function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPress, moveSourceDs, hasNote, isSplit }) {
   const timer = useRef(null);
   const fired = useRef(false);
   const startPress = (ds) => {
@@ -1144,6 +1168,7 @@ function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPre
           const on = shiftsOn(ds).filter(s => s.status !== "off");
           const shown = on.slice(0, 3);
           const note = hasNote && hasNote(ds);
+          const split = isSplit && isSplit(ds);
           return (
             <div key={ds} data-day={ds}
               onClick={() => { if (fired.current) { fired.current = false; return; } onDayClick(ds); }}
@@ -1153,7 +1178,7 @@ function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPre
               style={{
                 minHeight:62, padding:"3px 2px 4px", cursor:"pointer", touchAction:"manipulation",
                 borderTop: i < 7 ? "none" : "1px solid " + BG,
-                background: isMoveSrc ? "#EAF2FB" : "transparent",
+                background: isMoveSrc ? "#EAF2FB" : (split ? "#F3F6FB" : "transparent"),
                 outline: isMoveSrc ? "2px solid #1D3557" : (moveSourceDs ? "1px dashed #D8E4F2" : "none"),
                 borderRadius: isMoveSrc || moveSourceDs ? 8 : 0,
                 overflow:"hidden",
@@ -1166,6 +1191,7 @@ function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPre
                   color: isToday ? "#fff" : (past ? "#C4BFB8" : (weekend ? MUTED : DARK)),
                   fontSize:12, fontWeight: isToday ? 800 : 600,
                 }}>{d.getDate()}</span>
+                {split && <SplitBadge size={12} />}
                 {note && <span title="Note" style={{ width:6, height:6, borderRadius:"50%", background:"#E8973A", boxShadow:"0 0 0 1.5px "+CARD, flexShrink:0 }} />}
               </div>
               <div style={{ display:"flex", flexDirection:"column", gap:1.5 }}>
@@ -1190,8 +1216,10 @@ function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPre
 }
 
 // Tap a day -> who's on it, plus everyone in the app to add (admin).
-function DayPeopleSheet({ ds, users, dayShifts, note, admin, today, onClose, onAdd, onEdit, onOpenNotes }) {
+function DayPeopleSheet({ ds, users, dayShifts, note, split, admin, today, onClose, onAdd, onEdit, onOpenNotes, onToggleSplit }) {
   const [busy, setBusy] = useState(null);
+  const [splitBusy, setSplitBusy] = useState(false);
+  const noteText = note && note.note && note.note.trim() ? note.note : "";
   const shiftFor = (uid) => dayShifts.find(s => s.user_id === uid);
   const on = users.filter(u => { const s = shiftFor(u.id); return s && s.status !== "off"; });
 
@@ -1208,20 +1236,42 @@ function DayPeopleSheet({ ds, users, dayShifts, note, admin, today, onClose, onA
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
           <div>
             <div style={{ fontSize:18, fontWeight:800 }}>{fmtFullDay(ds)}</div>
-            <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
-              {ds === today ? "Today · " : ""}{on.length === 0 ? "Nobody booked" : on.length + " on shift"}
+            <div style={{ fontSize:12, color:MUTED, marginTop:2, display:"flex", alignItems:"center", gap:6 }}>
+              <span>{ds === today ? "Today · " : ""}{on.length === 0 ? "Nobody booked" : on.length + " on shift"}</span>
+              {split && <span style={{ display:"inline-flex", alignItems:"center", gap:4, color:SPLIT_COL, fontWeight:700 }}><SplitBadge size={12} />Split day</span>}
             </div>
           </div>
           <button onClick={onClose} style={{ background:"none", border:"none", fontSize:26, color:"#aaa", cursor:"pointer", lineHeight:1 }}>{"×"}</button>
         </div>
 
-        {(note || admin) && (
-          <div style={{ background: note ? "#FFF6E5" : BG, border:"1px solid " + (note ? "#F0DCB0" : BORDER), borderRadius:10, padding:"10px 12px", marginBottom:16 }}>
-            <div style={{ fontSize:10, fontWeight:800, color: note ? "#8A6D2F" : MUTED, letterSpacing:1.2, marginBottom: note ? 5 : 0 }}>NOTE</div>
-            {note && <div style={{ fontSize:13.5, color:"#5F4B1F", whiteSpace:"pre-wrap", lineHeight:1.4 }}>{note.note}</div>}
+        {admin && (
+          <button type="button" disabled={splitBusy}
+            onClick={async () => { setSplitBusy(true); await onToggleSplit(); setSplitBusy(false); }}
+            style={{ width:"100%", display:"flex", alignItems:"center", gap:10, marginBottom:12, padding:"12px 14px", textAlign:"left",
+              background: split ? "#EAF2FB" : CARD, border:"2px solid " + (split ? SPLIT_COL : BORDER),
+              borderRadius:12, cursor:"pointer", fontFamily:"inherit" }}>
+            <SplitBadge size={16} />
+            <span style={{ flex:1, minWidth:0 }}>
+              <span style={{ display:"block", fontSize:14, fontWeight:700, color: split ? SPLIT_COL : DARK }}>Split day</span>
+              <span style={{ display:"block", fontSize:11.5, color:MUTED, marginTop:1 }}>{split ? "Marked as shared — say who covers what in the note" : "Two of you sharing the store this day"}</span>
+            </span>
+            <span style={{ fontSize:12, fontWeight:800, color: split ? SPLIT_COL : MUTED, flexShrink:0 }}>{splitBusy ? "…" : (split ? "ON" : "OFF")}</span>
+          </button>
+        )}
+        {!admin && split && (
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12, padding:"10px 12px", background:"#EAF2FB", border:"1px solid #BBD4F0", borderRadius:10 }}>
+            <SplitBadge size={14} />
+            <span style={{ fontSize:13, fontWeight:700, color:SPLIT_COL }}>Split day — the store is shared</span>
+          </div>
+        )}
+
+        {(noteText || admin) && (
+          <div style={{ background: noteText ? "#FFF6E5" : BG, border:"1px solid " + (noteText ? "#F0DCB0" : BORDER), borderRadius:10, padding:"10px 12px", marginBottom:16 }}>
+            <div style={{ fontSize:10, fontWeight:800, color: noteText ? "#8A6D2F" : MUTED, letterSpacing:1.2, marginBottom: noteText ? 5 : 0 }}>NOTE</div>
+            {noteText && <div style={{ fontSize:13.5, color:"#5F4B1F", whiteSpace:"pre-wrap", lineHeight:1.4 }}>{noteText}</div>}
             {admin && (
-              <button onClick={onOpenNotes} style={{ marginTop: note ? 8 : 6, padding:"6px 12px", background:CARD, border:"1px solid " + BORDER, borderRadius:8, fontSize:12, fontWeight:700, color:DARK, cursor:"pointer", fontFamily:"inherit" }}>
-                {note ? "Edit note" : "Add a note"}
+              <button onClick={onOpenNotes} style={{ marginTop: noteText ? 8 : 6, padding:"6px 12px", background:CARD, border:"1px solid " + BORDER, borderRadius:8, fontSize:12, fontWeight:700, color:DARK, cursor:"pointer", fontFamily:"inherit" }}>
+                {noteText ? "Edit note" : "Add a note"}
               </button>
             )}
           </div>
@@ -1276,12 +1326,12 @@ function DayNotesSheet({ ds, note, onClose, onSave }) {
           placeholder={"e.g. Richie leaves at 5, Vic steps in"}
           style={{ ...S.field, resize:"vertical", lineHeight:1.45, minHeight:110 }} />
 
-        {note && note.updated_by && (
+        {note && note.note && note.note.trim() && note.updated_by && (
           <div style={{ fontSize:11, color:MUTED, marginTop:8 }}>Last edited by {note.updated_by}</div>
         )}
 
         <button onClick={save} disabled={saving} style={{ ...S.btn(true), marginTop:16 }}>{saving ? "Saving…" : "Save note"}</button>
-        {note && (
+        {note && note.note && note.note.trim() && (
           <button onClick={() => onSave("")} style={{ width:"100%", marginTop:10, padding:"13px", background:"#FDECEC", border:"1px solid #F0C0C0", borderRadius:10, fontSize:14, fontWeight:700, color:"#c33", cursor:"pointer", fontFamily:"inherit" }}>Delete note</button>
         )}
       </div>
