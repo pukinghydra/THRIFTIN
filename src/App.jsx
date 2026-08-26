@@ -1158,7 +1158,7 @@ function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPre
                 borderRadius: isMoveSrc || moveSourceDs ? 8 : 0,
                 overflow:"hidden",
               }}>
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:2, marginBottom:2 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:3, marginBottom:2 }}>
                 <span style={{
                   display:"inline-flex", alignItems:"center", justifyContent:"center",
                   width:21, height:21, borderRadius:"50%",
@@ -1166,7 +1166,7 @@ function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPre
                   color: isToday ? "#fff" : (past ? "#C4BFB8" : (weekend ? MUTED : DARK)),
                   fontSize:12, fontWeight: isToday ? 800 : 600,
                 }}>{d.getDate()}</span>
-                {note && <span style={{ width:4, height:4, borderRadius:"50%", background:"#C58A1F" }} />}
+                {note && <span title="Note" style={{ width:6, height:6, borderRadius:"50%", background:"#E8973A", boxShadow:"0 0 0 1.5px "+CARD, flexShrink:0 }} />}
               </div>
               <div style={{ display:"flex", flexDirection:"column", gap:1.5 }}>
                 {shown.map(s => (
