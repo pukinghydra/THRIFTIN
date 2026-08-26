@@ -711,12 +711,15 @@ const WD_KEYS  = ["sun","mon","tue","wed","thu","fri","sat"];
 const WD_LABEL = { mon:"Mon", tue:"Tue", wed:"Wed", thu:"Thu", fri:"Fri", sat:"Sat", sun:"Sun" };
 const MO_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const MO_LONG  = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const WD_FULL  = { mon:"Monday", tue:"Tuesday", wed:"Wednesday", thu:"Thursday", fri:"Friday", sat:"Saturday", sun:"Sunday" };
+const WD_HEAD  = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];   // calendar columns, weeks run Mon \u2192 Sun
 
 function dateToStr(d){const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),da=String(d.getDate()).padStart(2,"0");return y+"-"+m+"-"+da;}
 function strToDate(s){return new Date(s+"T12:00:00");}
 function weekdayKey(s){return WD_KEYS[strToDate(s).getDay()];}
 function templateHours(u,s){const t=u&&u.hours_template;if(!t)return"";const v=t[weekdayKey(s)];return(v===0||v)?v:"";}
 function fmtDay(s){const d=strToDate(s);return WD_LABEL[WD_KEYS[d.getDay()]]+" "+d.getDate()+" "+MO_SHORT[d.getMonth()];}
+function fmtFullDay(s){const d=strToDate(s);return WD_FULL[WD_KEYS[d.getDay()]]+" "+d.getDate()+" "+MO_LONG[d.getMonth()];}
 function hoursNum(v){const n=parseFloat(v);return isNaN(n)?0:n;}
 
 const stepBtn = { width:38, height:38, borderRadius:10, border:"2px solid "+BORDER, background:CARD, fontSize:20, fontWeight:700, color:DARK, cursor:"pointer", fontFamily:"inherit", lineHeight:1 };
@@ -737,6 +740,7 @@ function HoursStepper({ value, onChange }) {
 
 function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const [shifts, setShifts] = useState([]);
+  const [notes, setNotes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [adjusting, setAdjusting] = useState(false);
@@ -744,13 +748,18 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const [adminUserId, setAdminUserId] = useState(null);
   const [monthOff, setMonthOff] = useState(0);
   const [editDay, setEditDay] = useState(null);
+  const [dayOpen, setDayOpen] = useState(null);
+  const [notesDay, setNotesDay] = useState(null);
   const [copiedId, setCopiedId] = useState(null);
   const [moveSource, setMoveSource] = useState(null);
   const [payOff, setPayOff] = useState(0);
   const [payCopied, setPayCopied] = useState(false);
 
   const load = useCallback(async () => {
-    try { const s = await api.get("shifts", "&order=date.desc"); setShifts(s); }
+    try {
+      const [s, n] = await Promise.all([api.get("shifts", "&order=date.desc"), api.get("day_notes", "&order=date.asc")]);
+      setShifts(s); setNotes(n);
+    }
     catch (e) { setErr(e.message || "Could not load schedule"); }
   }, []);
   useEffect(() => { (async () => { await load(); setLoading(false); })(); }, [load]);
@@ -884,11 +893,29 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
     );
   };
 
-  const upcoming = shifts.filter(s => s.date >= today && s.status !== "off");
-  const byDate = {};
-  upcoming.forEach(s => { (byDate[s.date] = byDate[s.date] || []).push(s); });
-  const upcomingDates = Object.keys(byDate).sort().slice(0, 10);
-  const ucolor = (uid) => { const u = users.find(x => x.id === uid); return u ? (u.color || "#888") : "#888"; };
+  // Everyone on one day, ordered the same way the staff list is.
+  const shiftsOn = (ds) => shifts.filter(s => s.date === ds)
+    .sort((a, b) => users.findIndex(u => u.id === a.user_id) - users.findIndex(u => u.id === b.user_id));
+
+  const noteOn = (ds) => notes.find(n => n.date === ds);
+  // One free-text note per day ("Richie leaves at 5, Vic steps in"). Empty text deletes it.
+  const saveNote = async (ds, text) => {
+    setErr("");
+    const t = (text || "").trim();
+    const ex = noteOn(ds);
+    try {
+      if (ex && !t) await api.del("day_notes", ex.id);
+      else if (ex) await api.patch("day_notes", ex.id, { note: t, updated_by: currentUser.name, updated_at: new Date().toISOString() });
+      else if (t) await api.post("day_notes", { date: ds, note: t, updated_by: currentUser.name });
+      await load();
+    } catch (e) { setErr(e.message || "Could not save note"); }
+  };
+
+  // Put someone on a day straight from the day popup — hours come from their weekly baseline.
+  const addToDay = async (u, ds) => {
+    const t = u.tracks_hours ? templateHours(u, ds) : "";
+    await upsert(u, ds, { status: "scheduled", hours: t === "" ? null : hoursNum(t) });
+  };
 
   const adminUser = users.find(u => u.id === adminUserId) || users.find(u => u.tracks_hours) || users[0];
   const base = new Date(); base.setDate(1); base.setMonth(base.getMonth() + monthOff);
@@ -896,6 +923,12 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
   const daysInMonth = new Date(yr, mo + 1, 0).getDate();
   const monthDays = [];
   for (let d = 1; d <= daysInMonth; d++) monthDays.push(dateToStr(new Date(yr, mo, d)));
+  // Calendar grid: weeks run Mon -> Sun, padded with blanks at both ends.
+  const leadBlanks = (new Date(yr, mo, 1).getDay() + 6) % 7;
+  const calCells = [];
+  for (let i = 0; i < leadBlanks; i++) calCells.push(null);
+  monthDays.forEach(ds => calCells.push(ds));
+  while (calCells.length % 7 !== 0) calCells.push(null);
   const monthShifts = adminUser ? monthDays.map(ds => ({ ds, sh: findShift(adminUser.id, ds) })) : [];
   const workedHours = monthShifts.reduce((sum, x) => sum + (x.sh && x.sh.status === "worked" ? hoursNum(x.sh.hours) : 0), 0);
   const workedDays = monthShifts.filter(x => x.sh && x.sh.status === "worked").length;
@@ -956,23 +989,43 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
 
       <TodayCard />
 
-      <div style={{ fontSize:12, fontWeight:700, color:MUTED, letterSpacing:1.5, textTransform:"uppercase", margin:"22px 0 10px" }}>Upcoming</div>
-      {upcomingDates.length === 0 && <div style={{ color:MUTED, fontSize:13, paddingBottom:8 }}>Nothing scheduled yet.</div>}
-      {upcomingDates.map(ds => (
-        <div key={ds} style={{ ...S.card, padding:"12px 16px" }}>
-          <div style={{ fontSize:13, fontWeight:700, marginBottom:8 }}>{fmtDay(ds)}{ds === today ? "  \u00b7 today" : ""}</div>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
-            {byDate[ds].map(s => (
-              <div key={s.id} style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 10px", background:BG, borderRadius:20, fontSize:13 }}>
-                <span style={{ width:9, height:9, borderRadius:"50%", background:ucolor(s.user_id) }} />
-                {s.user_name}
-                {s.hours != null && <span style={{ color:MUTED }}>{s.hours}h</span>}
-                {s.status === "worked" && <span style={{ color:"#2C6E49", fontSize:11 }}>{"\u2713"}</span>}
-              </div>
-            ))}
-          </div>
+      {/* ── Month view ── the whole team, every day; admin taps a day to staff it */}
+      <div style={{ display:"flex", alignItems:"flex-end", justifyContent:"space-between", margin:"24px 0 10px" }}>
+        <div>
+          <div style={{ fontSize:26, fontWeight:800, letterSpacing:-0.5, lineHeight:1.1 }}>{MO_LONG[mo]}</div>
+          <div style={{ fontSize:13, color:MUTED, fontWeight:600 }}>{yr}</div>
         </div>
-      ))}
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          {monthOff !== 0 && (
+            <button onClick={() => { setMonthOff(0); setMoveSource(null); }} style={{ padding:"9px 14px", background:CARD, border:"2px solid "+BORDER, borderRadius:20, fontSize:12, fontWeight:700, color:DARK, cursor:"pointer", fontFamily:"inherit" }}>Today</button>
+          )}
+          <button onClick={() => { setMonthOff(monthOff - 1); setMoveSource(null); }} style={{ ...stepBtn, width:40 }}>{"\u2039"}</button>
+          <button onClick={() => { setMonthOff(monthOff + 1); setMoveSource(null); }} style={{ ...stepBtn, width:40 }}>{"\u203a"}</button>
+        </div>
+      </div>
+
+      {adminMode && moveSource && (
+        <div style={{ background:"#EAF2FB", border:"1px solid #BBD4F0", borderRadius:10, padding:"10px 12px", marginBottom:10, display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+          <span style={{ fontSize:13, color:"#1D3557" }}>Moving {moveSource.userName} {"\u2014"} {fmtDay(moveSource.ds)}. Tap a day.</span>
+          <button onClick={() => setMoveSource(null)} style={{ padding:"6px 12px", background:CARD, border:"1px solid #BBD4F0", borderRadius:8, fontSize:12, fontWeight:600, color:"#1D3557", cursor:"pointer", fontFamily:"inherit", flexShrink:0 }}>Cancel</button>
+        </div>
+      )}
+
+      <MonthCalendar
+        cells={calCells} shiftsOn={shiftsOn} users={users} today={today} hasNote={ds => !!noteOn(ds)}
+        moveSourceDs={moveSource ? moveSource.ds : null}
+        onDayClick={ds => { if (adminMode && moveSource) doMove(ds); else setDayOpen(ds); }}
+        onDayLongPress={adminMode ? (ds => setNotesDay(ds)) : null}
+      />
+
+      <div style={{ display:"flex", flexWrap:"wrap", gap:10, padding:"2px 2px 4px", marginBottom:4 }}>
+        {users.map(u => (
+          <div key={u.id} style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color:MUTED, fontWeight:600 }}>
+            <span style={{ width:9, height:9, borderRadius:3, background:u.color || "#888" }} />{u.name}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize:12, color:MUTED, paddingBottom:4 }}>{adminMode ? "Tap a day to staff it \u00b7 hold a day for notes" : "Tap a day to see who\u2019s working."}</div>
 
       {adminMode && adminUser && (
         <div style={{ marginTop:28, marginBottom:24 }}>
@@ -1007,12 +1060,6 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
             ))}
           </div>
 
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
-            <button onClick={() => { setMonthOff(monthOff - 1); setMoveSource(null); }} style={{ ...stepBtn, width:44 }}>{"\u2039"}</button>
-            <div style={{ fontSize:15, fontWeight:700 }}>{MO_LONG[mo]} {yr}</div>
-            <button onClick={() => { setMonthOff(monthOff + 1); setMoveSource(null); }} style={{ ...stepBtn, width:44 }}>{"\u203a"}</button>
-          </div>
-
           {adminUser.tracks_hours && (
             <div style={{ ...S.card }}>
               <div style={{ fontSize:22, fontWeight:800 }}>{workedHours}h</div>
@@ -1026,49 +1073,218 @@ function ShiftsScreen({ users, currentUser, adminMode, active }) {
             </div>
           )}
 
-          {!moveSource && (
-            <button onClick={applyBaseline} style={{ width:"100%", padding:"11px", background:CARD, border:"2px dashed "+BORDER, borderRadius:10, fontSize:13, fontWeight:600, color:"#555", cursor:"pointer", fontFamily:"inherit", marginBottom:12 }}>
-              Apply {adminUser.name}{"\u2019"}s baseline to this month
-            </button>
-          )}
-
-          {moveSource && (
-            <div style={{ background:"#EAF2FB", border:"1px solid #BBD4F0", borderRadius:10, padding:"10px 12px", marginBottom:12, display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
-              <span style={{ fontSize:13, color:"#1D3557" }}>Moving {fmtDay(moveSource.ds)} {"\u2014"} tap a day to place it</span>
-              <button onClick={() => setMoveSource(null)} style={{ padding:"6px 12px", background:CARD, border:"1px solid #BBD4F0", borderRadius:8, fontSize:12, fontWeight:600, color:"#1D3557", cursor:"pointer", fontFamily:"inherit", flexShrink:0 }}>Cancel</button>
-            </div>
-          )}
-
-          {monthShifts.map(({ ds, sh }) => {
-            const past = ds < today, isToday = ds === today;
-            const isMoveSrc = moveSource && moveSource.ds === ds;
-            let right = <span style={{ color:"#ccc", fontSize:13 }}>{"\u2014"}</span>;
-            if (sh) {
-              if (sh.status === "worked") right = <span style={{ color:"#2C6E49", fontWeight:700, fontSize:14 }}>{sh.hours != null ? sh.hours + "h" : "in"} {"\u2713"}</span>;
-              else if (sh.status === "scheduled") right = <span style={{ color: past ? "#C58A1F" : "#555", fontWeight:600, fontSize:14 }}>{sh.hours != null ? sh.hours + "h" : "in"} {past ? "needs confirm" : "planned"}</span>;
-              else right = <span style={{ color:MUTED, fontSize:13 }}>off</span>;
-            }
-            const border = isMoveSrc ? "2px solid #1D3557" : (moveSource ? "2px dashed #BBD4F0" : "1px solid "+BORDER);
-            return (
-              <button key={ds} onClick={() => moveSource ? doMove(ds) : setEditDay({ ds, user: adminUser })} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", padding:"11px 14px", background: isMoveSrc ? "#EAF2FB" : (isToday ? "#F2F0EB" : CARD), border, borderRadius:10, marginBottom:6, cursor:"pointer", fontFamily:"inherit", textAlign:"left" }}>
-                <span style={{ fontSize:14, fontWeight: isToday ? 700 : 500 }}>{fmtDay(ds)}{isMoveSrc ? "  (moving)" : ""}</span>
-                {right}
-              </button>
-            );
-          })}
+          <button onClick={applyBaseline} style={{ width:"100%", padding:"11px", background:CARD, border:"2px dashed "+BORDER, borderRadius:10, fontSize:13, fontWeight:600, color:"#555", cursor:"pointer", fontFamily:"inherit" }}>
+            Apply {adminUser.name}{"\u2019"}s baseline to this month
+          </button>
         </div>
+      )}
+
+      {dayOpen && (
+        <DayPeopleSheet
+          ds={dayOpen} users={users} dayShifts={shiftsOn(dayOpen)} note={noteOn(dayOpen)} admin={adminMode} today={today}
+          onClose={() => setDayOpen(null)}
+          onAdd={async (u) => { await addToDay(u, dayOpen); }}
+          onEdit={(u) => setEditDay({ ds: dayOpen, user: u })}
+          onOpenNotes={() => setNotesDay(dayOpen)}
+        />
+      )}
+
+      {notesDay && (
+        <DayNotesSheet
+          ds={notesDay} note={noteOn(notesDay)}
+          onClose={() => setNotesDay(null)}
+          onSave={async (text) => { await saveNote(notesDay, text); setNotesDay(null); }}
+        />
       )}
 
       {editDay && (
         <DayEditorSheet
           ds={editDay.ds} user={editDay.user} shift={findShift(editDay.user.id, editDay.ds)} users={users}
           onClose={() => setEditDay(null)}
-          onMove={() => { const sh = findShift(editDay.user.id, editDay.ds); if (sh) { setMoveSource({ ds: editDay.ds, sh, userId: editDay.user.id, userName: editDay.user.name }); } setEditDay(null); }}
+          onMove={() => { const sh = findShift(editDay.user.id, editDay.ds); if (sh) { setMoveSource({ ds: editDay.ds, sh, userId: editDay.user.id, userName: editDay.user.name }); } setEditDay(null); setDayOpen(null); }}
           onReassign={async (tu) => { await reassign(findShift(editDay.user.id, editDay.ds), editDay.ds, tu); setEditDay(null); }}
           onApply={async (patch) => { await upsert(editDay.user, editDay.ds, patch); setEditDay(null); }}
           onClear={async (id) => { await clearShift(id); setEditDay(null); }}
         />
       )}
+    </div>
+  );
+}
+
+// Month grid — the whole team at a glance. Tap a day to staff it, hold it for notes.
+function MonthCalendar({ cells, shiftsOn, users, today, onDayClick, onDayLongPress, moveSourceDs, hasNote }) {
+  const timer = useRef(null);
+  const fired = useRef(false);
+  const startPress = (ds) => {
+    fired.current = false;
+    if (!onDayLongPress) return;
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      fired.current = true;
+      try { if (navigator.vibrate) navigator.vibrate(12); } catch {}
+      onDayLongPress(ds);
+    }, 500);
+  };
+  const endPress = () => clearTimeout(timer.current);
+  const colorOf = (uid) => { const u = users.find(x => x.id === uid); return u ? (u.color || "#888") : "#888"; };
+
+  return (
+    <div style={{ background:CARD, border:"1px solid "+BORDER, borderRadius:14, padding:"10px 8px 8px", marginBottom:10, userSelect:"none", WebkitUserSelect:"none", WebkitTouchCallout:"none" }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(7, 1fr)", marginBottom:2 }}>
+        {WD_HEAD.map((w, i) => (
+          <div key={w + i} style={{ textAlign:"center", fontSize:10, fontWeight:700, color: i > 4 ? "#C4BFB8" : MUTED, letterSpacing:0.6, paddingBottom:4 }}>{w[0]}</div>
+        ))}
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(7, 1fr)" }}>
+        {cells.map((ds, i) => {
+          if (!ds) return <div key={"b" + i} style={{ borderTop: i < 7 ? "none" : "1px solid " + BG }} />;
+          const d = strToDate(ds);
+          const isToday = ds === today, past = ds < today, weekend = d.getDay() === 0 || d.getDay() === 6;
+          const isMoveSrc = moveSourceDs === ds;
+          const on = shiftsOn(ds).filter(s => s.status !== "off");
+          const shown = on.slice(0, 3);
+          const note = hasNote && hasNote(ds);
+          return (
+            <div key={ds} data-day={ds}
+              onClick={() => { if (fired.current) { fired.current = false; return; } onDayClick(ds); }}
+              onPointerDown={() => startPress(ds)}
+              onPointerUp={endPress} onPointerLeave={endPress} onPointerCancel={endPress}
+              onContextMenu={e => e.preventDefault()}
+              style={{
+                minHeight:62, padding:"3px 2px 4px", cursor:"pointer", touchAction:"manipulation",
+                borderTop: i < 7 ? "none" : "1px solid " + BG,
+                background: isMoveSrc ? "#EAF2FB" : "transparent",
+                outline: isMoveSrc ? "2px solid #1D3557" : (moveSourceDs ? "1px dashed #D8E4F2" : "none"),
+                borderRadius: isMoveSrc || moveSourceDs ? 8 : 0,
+                overflow:"hidden",
+              }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:2, marginBottom:2 }}>
+                <span style={{
+                  display:"inline-flex", alignItems:"center", justifyContent:"center",
+                  width:21, height:21, borderRadius:"50%",
+                  background: isToday ? "#D64550" : "transparent",
+                  color: isToday ? "#fff" : (past ? "#C4BFB8" : (weekend ? MUTED : DARK)),
+                  fontSize:12, fontWeight: isToday ? 800 : 600,
+                }}>{d.getDate()}</span>
+                {note && <span style={{ width:4, height:4, borderRadius:"50%", background:"#C58A1F" }} />}
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:1.5 }}>
+                {shown.map(s => (
+                  <div key={s.id} style={{
+                    background: colorOf(s.user_id), color:"#fff", borderRadius:3,
+                    padding:"1px 3px", fontSize:8.5, fontWeight:700, lineHeight:1.35,
+                    whiteSpace:"nowrap", overflow:"hidden", textOverflow:"clip",
+                    opacity: past && s.status !== "worked" ? 0.55 : 1,
+                  }}>
+                    {s.user_name}{s.hours != null ? " " + s.hours : ""}{s.status === "worked" ? "✓" : ""}
+                  </div>
+                ))}
+                {on.length > shown.length && <div style={{ fontSize:8.5, fontWeight:700, color:MUTED, paddingLeft:2 }}>+{on.length - shown.length}</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Tap a day -> who's on it, plus everyone in the app to add (admin).
+function DayPeopleSheet({ ds, users, dayShifts, note, admin, today, onClose, onAdd, onEdit, onOpenNotes }) {
+  const [busy, setBusy] = useState(null);
+  const shiftFor = (uid) => dayShifts.find(s => s.user_id === uid);
+  const on = users.filter(u => { const s = shiftFor(u.id); return s && s.status !== "off"; });
+
+  const statusOf = (s) => {
+    if (!s) return null;
+    if (s.status === "off") return { txt:"Off", col:MUTED };
+    if (s.status === "worked") return { txt:(s.hours != null ? s.hours + "h " : "") + "worked ✓", col:"#2C6E49" };
+    return { txt:(s.hours != null ? s.hours + "h " : "") + (ds < today ? "needs confirm" : "booked"), col: ds < today ? "#C58A1F" : "#555" };
+  };
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", zIndex:640, display:"flex", alignItems:"flex-end", justifyContent:"center" }} onClick={onClose}>
+      <div style={{ width:"100%", maxWidth:480, background:CARD, borderRadius:"18px 18px 0 0", maxHeight:"88vh", overflowY:"auto", padding:"22px 20px 36px" }} onClick={e => e.stopPropagation()}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
+          <div>
+            <div style={{ fontSize:18, fontWeight:800 }}>{fmtFullDay(ds)}</div>
+            <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>
+              {ds === today ? "Today · " : ""}{on.length === 0 ? "Nobody booked" : on.length + " on shift"}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:26, color:"#aaa", cursor:"pointer", lineHeight:1 }}>{"×"}</button>
+        </div>
+
+        {(note || admin) && (
+          <div style={{ background: note ? "#FFF6E5" : BG, border:"1px solid " + (note ? "#F0DCB0" : BORDER), borderRadius:10, padding:"10px 12px", marginBottom:16 }}>
+            <div style={{ fontSize:10, fontWeight:800, color: note ? "#8A6D2F" : MUTED, letterSpacing:1.2, marginBottom: note ? 5 : 0 }}>NOTE</div>
+            {note && <div style={{ fontSize:13.5, color:"#5F4B1F", whiteSpace:"pre-wrap", lineHeight:1.4 }}>{note.note}</div>}
+            {admin && (
+              <button onClick={onOpenNotes} style={{ marginTop: note ? 8 : 6, padding:"6px 12px", background:CARD, border:"1px solid " + BORDER, borderRadius:8, fontSize:12, fontWeight:700, color:DARK, cursor:"pointer", fontFamily:"inherit" }}>
+                {note ? "Edit note" : "Add a note"}
+              </button>
+            )}
+          </div>
+        )}
+
+        <div style={{ ...S.label, marginBottom:8 }}>{admin ? "Who’s working" : "On this day"}</div>
+        {users.map(u => {
+          const s = shiftFor(u.id);
+          const st = statusOf(s);
+          const act = async () => {
+            if (!admin) return;
+            if (s) { onEdit(u); return; }
+            setBusy(u.id); await onAdd(u); setBusy(null);
+          };
+          return (
+            <div key={u.id} onClick={act} role={admin ? "button" : undefined}
+              style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 12px", marginBottom:7,
+                background: s && s.status !== "off" ? BG : CARD,
+                border:"1px solid " + (s && s.status !== "off" ? BORDER : BG),
+                borderRadius:12, cursor: admin ? "pointer" : "default" }}>
+              <span style={{ width:11, height:11, borderRadius:4, background:u.color || "#888", flexShrink:0 }} />
+              <span style={{ flex:1, minWidth:0, fontSize:15, fontWeight:700, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{u.name}</span>
+              {st
+                ? <span style={{ fontSize:13, fontWeight:600, color:st.col, flexShrink:0 }}>{st.txt}{admin ? "  ›" : ""}</span>
+                : admin
+                  ? <span style={{ fontSize:13, fontWeight:700, color:"#1D3557", flexShrink:0 }}>{busy === u.id ? "Adding…" : "+ Add"}</span>
+                  : <span style={{ fontSize:13, color:"#ccc", flexShrink:0 }}>{"—"}</span>}
+            </div>
+          );
+        })}
+        {admin && <div style={{ fontSize:12, color:MUTED, marginTop:10 }}>Tap someone already on to change hours, mark worked, move or remove the shift.</div>}
+      </div>
+    </div>
+  );
+}
+
+// Long-press a day (admin) -> a free-text note for that day.
+function DayNotesSheet({ ds, note, onClose, onSave }) {
+  const [text, setText] = useState(note ? note.note : "");
+  const [saving, setSaving] = useState(false);
+  const save = async () => { setSaving(true); await onSave(text); setSaving(false); };
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", zIndex:660, display:"flex", alignItems:"flex-end", justifyContent:"center" }} onClick={onClose}>
+      <div style={{ width:"100%", maxWidth:480, background:CARD, borderRadius:"18px 18px 0 0", maxHeight:"88vh", overflowY:"auto", padding:"22px 20px 36px" }} onClick={e => e.stopPropagation()}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+          <div style={{ fontSize:17, fontWeight:800 }}>Note</div>
+          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:24, color:"#aaa", cursor:"pointer" }}>{"×"}</button>
+        </div>
+        <div style={{ fontSize:13, color:MUTED, marginBottom:16 }}>{fmtFullDay(ds)}</div>
+
+        <textarea value={text} onChange={e => setText(e.target.value)} rows={5} autoFocus
+          placeholder={"e.g. Richie leaves at 5, Vic steps in"}
+          style={{ ...S.field, resize:"vertical", lineHeight:1.45, minHeight:110 }} />
+
+        {note && note.updated_by && (
+          <div style={{ fontSize:11, color:MUTED, marginTop:8 }}>Last edited by {note.updated_by}</div>
+        )}
+
+        <button onClick={save} disabled={saving} style={{ ...S.btn(true), marginTop:16 }}>{saving ? "Saving…" : "Save note"}</button>
+        {note && (
+          <button onClick={() => onSave("")} style={{ width:"100%", marginTop:10, padding:"13px", background:"#FDECEC", border:"1px solid #F0C0C0", borderRadius:10, fontSize:14, fontWeight:700, color:"#c33", cursor:"pointer", fontFamily:"inherit" }}>Delete note</button>
+        )}
+      </div>
     </div>
   );
 }
