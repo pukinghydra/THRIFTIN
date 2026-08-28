@@ -528,6 +528,7 @@ export default function App() {
   const [sales, setSales] = useState([]);
   const [inventory, setInventory] = useState([]);
   const [brands, setBrands] = useState([]);
+  const [dataStale, setDataStale] = useState(false);
   const [currentUser, setCU] = useState(null);
   const [tab, setTab] = useState(() => {
     try { return localStorage.getItem("thriftin_tab") || "log"; } catch { return "log"; }
@@ -573,19 +574,38 @@ export default function App() {
   useEffect(() => {
     if (REQUIRE_PIN && !authed) return;
     (async () => {
-      try {
-        const [u, c, s, inv, br] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc"), api.get("brands", "&order=name")]);
-        setUsers(u); setCats(c); setSales(s); setInventory(inv); setBrands(br);
+      const ok = await refresh();
+      if (ok.users) {
         const savedId = localStorage.getItem("thriftin_user");
-        if (savedId) { const found = u.find(x => x.id === savedId); if (found) { setCU(found); setShowPicker(false); } }
-      } catch {}
+        if (savedId) { const found = ok.users.find(x => x.id === savedId); if (found) { setCU(found); setShowPicker(false); } }
+      }
       setLoading(false);
     })();
   }, [authed]);
 
+  // Reload every table, but treat a failed request as "no change" rather
+  // than "empty": a dropped connection or an expiring token must never wipe
+  // categories, stock or anyone's schedule from the screen until a restart.
+  // Returns a map of the tables that actually loaded, for callers that need
+  // the fresh rows (e.g. picking the saved user on boot).
   const refresh = async () => {
-    const [u, c, s, inv, br] = await Promise.all([api.get("users", "&order=name"), api.get("categories", "&order=name"), api.get("sales", "&order=created_at.desc"), api.get("inventory", "&order=added_at.desc"), api.get("brands", "&order=name")]);
-    setUsers(u); setCats(c); setSales(s); setInventory(inv); setBrands(br);
+    const specs = [
+      ["users", "&order=name", setUsers],
+      ["categories", "&order=name", setCats],
+      ["sales", "&order=created_at.desc", setSales],
+      ["inventory", "&order=added_at.desc", setInventory],
+      ["brands", "&order=name", setBrands],
+    ];
+    const results = await Promise.allSettled(specs.map(([t, q]) => api.list(t, q)));
+    const loaded = {};
+    let anyFailed = false;
+    results.forEach((r, i) => {
+      const [table, , setter] = specs[i];
+      if (r.status === "fulfilled") { setter(r.value); loaded[table === "categories" ? "cats" : table] = r.value; }
+      else anyFailed = true;
+    });
+    setDataStale(anyFailed);
+    return { ...loaded, users: loaded.users };
   };
 
   // Monday-morning: auto-open the Sell-through report once per Monday, per device
@@ -632,6 +652,7 @@ export default function App() {
     <div style={S.page}>
       {toast && <Toast msg={toast} />}
       {updateReady && <div onClick={() => location.reload()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 78, zIndex: 9000, background: DARK, color: "#fff", borderRadius: 20, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)" }}>{"↻"} Update available — tap to refresh</div>}
+      {dataStale && <div onClick={() => refresh()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 118, zIndex: 9000, background: "#A33", color: "#fff", borderRadius: 20, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)", maxWidth: "90%", textAlign: "center" }}>{"⚠"} Couldn’t reach the server — tap to retry (nothing lost)</div>}
       {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setReportPeriod(null); setShowReport(true); }} />}
       {showReport && <ReportScreen key={reportPeriod || "manual"} sales={sales} cats={cats} initialPeriod={reportPeriod} onClose={() => { setShowReport(false); setReportPeriod(null); }} />}
 
