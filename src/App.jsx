@@ -577,7 +577,7 @@ export default function App() {
       const ok = await refresh();
       if (ok.users) {
         const savedId = localStorage.getItem("thriftin_user");
-        if (savedId) { const found = ok.users.find(x => x.id === savedId); if (found) { setCU(found); setShowPicker(false); } }
+        if (savedId) { const found = ok.users.find(x => x.id === savedId); if (found && found.active !== false) { setCU(found); setShowPicker(false); } }
       }
       setLoading(false);
     })();
@@ -714,7 +714,7 @@ function UserPicker({ users, onPick, onAdd }) {
       <h2 style={{ fontSize: 24, fontWeight: 800, margin: "0 0 8px", textAlign: "center" }}>Who is logging?</h2>
       <p style={{ fontSize: 14, color: MUTED, margin: "0 0 36px", textAlign: "center" }}>Pick yourself or add new staff.</p>
 
-      {users.map(u => (
+      {users.filter(u => u.active !== false).map(u => (
         <button key={u.id} onClick={() => onPick(u)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", padding: "18px 20px", marginBottom: 10, background: CARD, border: "2px solid " + BORDER, borderRadius: 14, cursor: "pointer", fontFamily: "inherit", fontSize: 16, fontWeight: 600, color: DARK }}>
           <span style={{ width: 16, height: 16, borderRadius: "50%", background: u.color || "#888", flexShrink: 0 }} />
           {u.name}
