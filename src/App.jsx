@@ -2922,12 +2922,13 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
   const queuedItems = queue.map(id => inventory.find(i => i.id === id)).filter(Boolean);
 
   const base = (statusFilter === "in_stock" ? inStock : sold);
+  // Origin narrows everything downstream, so the category chips and the brand
+  // breakdown count what is actually on screen rather than the whole tab.
+  const originBase = base.filter(i => originFilter === "import" ? !!i.is_import : originFilter === "eu" ? !i.is_import : true);
 
-  const shown = base.filter(i => {
+  const shown = originBase.filter(i => {
     if (catFilter && i.category_id !== catFilter) return false;
     if (brandFilter && (i.brand || "") !== brandFilter) return false;
-    if (originFilter === "import" && !i.is_import) return false;
-    if (originFilter === "eu" && i.is_import) return false;
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (i.comment || "").toLowerCase().includes(q) ||
@@ -2940,11 +2941,11 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
   // Brand breakdown within the active category (for the "14 x YSL shirts" view)
   const brandBreakdown = useMemo(() => {
     if (!catFilter) return [];
-    const inCat = base.filter(i => i.category_id === catFilter);
+    const inCat = originBase.filter(i => i.category_id === catFilter);
     const counts = {};
     inCat.forEach(i => { const b = i.brand || "(no brand)"; counts[b] = (counts[b] || 0) + 1; });
     return Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  }, [base, catFilter]);
+  }, [base, catFilter, originFilter]);
 
   const totalStockValue = inStock.reduce((s, i) => s + (parseFloat(i.sell_price) || 0), 0);
 
@@ -3124,7 +3125,7 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
       {/* Origin filter */}
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
         {[["", "All", base.length], ["eu", "EU", base.filter(i => !i.is_import).length], ["import", "IMPORT", base.filter(i => i.is_import).length]].map(([k, lbl, n]) => (
-          <button key={k || "all"} onClick={() => setOriginFilter(k)} style={{ ...S.chip(originFilter === k, k === "import" ? IMPORT_C : null), flex: 1, padding: "7px 6px", fontSize: 12, borderRadius: 8, textAlign: "center" }}>{lbl} {n}</button>
+          <button key={k || "all"} onClick={() => { setOriginFilter(k); setCatFilter(""); setBrandFilter(""); }} style={{ ...S.chip(originFilter === k, k === "import" ? IMPORT_C : null), flex: 1, padding: "7px 6px", fontSize: 12, borderRadius: 8, textAlign: "center" }}>{lbl} {n}</button>
         ))}
       </div>
 
@@ -3132,7 +3133,7 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
       <div style={{ display: "flex", gap: 5, overflowX: "auto", paddingBottom: 8, marginBottom: 6 }}>
         <button onClick={() => { setCatFilter(""); setBrandFilter(""); }} style={{ ...S.chip(!catFilter, null), padding: "6px 12px", fontSize: 12, borderRadius: 8, flexShrink: 0 }}>All</button>
         {cats.map(c => {
-          const n = base.filter(i => i.category_id === c.id).length;
+          const n = originBase.filter(i => i.category_id === c.id).length;
           if (!n) return null;
           return <button key={c.id} onClick={() => { setCatFilter(catFilter === c.id ? "" : c.id); setBrandFilter(""); }} style={{ ...S.chip(catFilter === c.id, getCatColor(c, cats)), padding: "6px 12px", fontSize: 12, borderRadius: 8, flexShrink: 0 }}>{c.name} {n}</button>;
         })}
