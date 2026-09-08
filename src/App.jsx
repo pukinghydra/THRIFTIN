@@ -105,6 +105,7 @@ const CARD = "#FFFFFF";
 const BORDER = "#E8E4DF";
 const MUTED = "#9E9A94";
 const DARK = "#1A1A1A";
+const IMPORT_C = "#1D3557";
 
 // ── Brand aliases for normalization ──
 const BRAND_ALIASES = {
@@ -265,7 +266,32 @@ const api = {
     }
     return "THR-" + String(next).padStart(6, "0");
   },
+  // Insert-or-update by primary key. Used for the per-category buy-in
+  // estimates, where a row may or may not exist yet.
+  upsert: async (table, rows) => {
+    const r = await fetch(sb.url + "/" + table, { method: "POST", headers: { ...sb.h, Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(rows) });
+    if (!r.ok) { const txt = await r.text().catch(() => ""); throw new Error("Save failed (" + r.status + "): " + txt.slice(0, 200)); }
+    return r.json();
+  },
 };
+
+// ── CSV export ──
+// Semicolon-separated with a UTF-8 BOM: that is what Excel on a Swedish locale
+// expects, so the file opens with columns already split instead of every row
+// crammed into column A.
+const csvCell = (v) => {
+  const s = v == null ? "" : String(v);
+  return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+};
+const toCSV = (rows) => "\uFEFF" + rows.map(r => r.map(csvCell).join(";")).join("\r\n");
+const downloadCSV = (filename, rows) => {
+  const url = URL.createObjectURL(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+};
+const todayStamp = () => new Date().toISOString().slice(0, 10);
 
 const S = {
   page: { background: BG, minHeight: "100vh", maxWidth: 480, margin: "0 auto", fontFamily: "'Helvetica Neue', Arial, sans-serif", color: DARK, overflowX: "hidden", position: "relative" },
@@ -528,6 +554,7 @@ export default function App() {
   const [sales, setSales] = useState([]);
   const [inventory, setInventory] = useState([]);
   const [brands, setBrands] = useState([]);
+  const [estimates, setEstimates] = useState([]);
   const [dataStale, setDataStale] = useState(false);
   const [currentUser, setCU] = useState(null);
   const [tab, setTab] = useState(() => {
@@ -538,6 +565,7 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [showAdmin, setShowAdmin] = useState(false);
   const [showReport, setShowReport] = useState(false);
+  const [showEstimate, setShowEstimate] = useState(false);
   const [reportPeriod, setReportPeriod] = useState(null);
   const [updateReady, setUpdateReady] = useState(false);
   const [adminMode, setAdminMode] = useState(false);
@@ -595,6 +623,7 @@ export default function App() {
       ["sales", "&order=created_at.desc", setSales],
       ["inventory", "&order=added_at.desc", setInventory],
       ["brands", "&order=name", setBrands],
+      ["category_estimates", "", setEstimates],
     ];
     const results = await Promise.allSettled(specs.map(([t, q]) => api.list(t, q)));
     const loaded = {};
@@ -653,7 +682,8 @@ export default function App() {
       {toast && <Toast msg={toast} />}
       {updateReady && <div onClick={() => location.reload()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 78, zIndex: 9000, background: DARK, color: "#fff", borderRadius: 20, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)" }}>{"↻"} Update available — tap to refresh</div>}
       {dataStale && <div onClick={() => refresh()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 118, zIndex: 9000, background: "#A33", color: "#fff", borderRadius: 20, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)", maxWidth: "90%", textAlign: "center" }}>{"⚠"} Couldn’t reach the server — tap to retry (nothing lost)</div>}
-      {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setReportPeriod(null); setShowReport(true); }} />}
+      {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setReportPeriod(null); setShowReport(true); }} onOpenEstimate={() => { setShowAdmin(false); setShowEstimate(true); }} />}
+      {showEstimate && <EstimateScreen inventory={inventory} cats={cats} estimates={estimates} onChanged={refresh} onClose={() => setShowEstimate(false)} showToast={showToast} />}
       {showReport && <ReportScreen key={reportPeriod || "manual"} sales={sales} cats={cats} initialPeriod={reportPeriod} onClose={() => { setShowReport(false); setReportPeriod(null); }} />}
 
       <div style={{ padding: "16px 20px 12px", background: CARD, borderBottom: "1px solid " + BORDER, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
@@ -1484,7 +1514,7 @@ function UserHoursConfig({ user, onChanged }) {
   );
 }
 
-function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged, onOpenReport }) {
+function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged, onOpenReport, onOpenEstimate }) {
   const [confirm, setConfirm] = useState(null);
 
   const removeUser = async (id) => { await api.del("users", id); await onChanged(); setConfirm(null); };
@@ -1511,8 +1541,13 @@ function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged,
           </div>
         </div>
 
-        <button onClick={onOpenReport} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", background: DARK, border: "none", borderRadius: 12, marginBottom: 22, cursor: "pointer", fontFamily: "inherit" }}>
+        <button onClick={onOpenReport} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", background: DARK, border: "none", borderRadius: 12, marginBottom: 10, cursor: "pointer", fontFamily: "inherit" }}>
           <span style={{ color: "#fff", fontSize: 14, fontWeight: 700 }}>{"📊"} Sell-through report</span>
+          <span style={{ color: "#fff", fontSize: 18 }}>{"›"}</span>
+        </button>
+
+        <button onClick={onOpenEstimate} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", background: IMPORT_C, border: "none", borderRadius: 12, marginBottom: 22, cursor: "pointer", fontFamily: "inherit" }}>
+          <span style={{ color: "#fff", fontSize: 14, fontWeight: 700 }}>{"💰"} Inventory estimate</span>
           <span style={{ color: "#fff", fontSize: 18 }}>{"›"}</span>
         </button>
 
@@ -1553,6 +1588,186 @@ function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged,
               </div>
             </div>
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Inventory estimate ──
+// There is no reliable buy-in price per item, so stock is valued with one
+// estimated buy-in per category, split by origin: Sweden/EU vs IMPORT
+// (UK or outside the EU). Quantities come from what is actually in stock;
+// only the prices are entered by hand, and they persist in category_estimates.
+function EstimateScreen({ inventory, cats, estimates, onChanged, onClose, showToast }) {
+  const [draft, setDraft] = useState(() => {
+    const d = {};
+    (estimates || []).forEach(e => { d[e.category_id] = { eu: e.buy_price ?? "", imp: e.buy_price_import ?? "" }; });
+    return d;
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const kr = n => Math.round(n).toLocaleString("sv-SE") + " kr";
+  const num = v => { const n = parseFloat(v); return (v === "" || v == null || isNaN(n)) ? null : n; };
+  const get = (id, k) => draft[id]?.[k] ?? "";
+  const set = (id, k, v) => setDraft(d => ({ ...d, [id]: { ...(d[id] || { eu: "", imp: "" }), [k]: v } }));
+  // A blank IMPORT price means "same as the EU price" rather than "free".
+  const priceEU = id => num(get(id, "eu")) ?? 0;
+  const priceIM = id => num(get(id, "imp")) ?? priceEU(id);
+
+  const rows = useMemo(() => {
+    const map = new Map();
+    inventory.filter(i => i.status === "in_stock").forEach(i => {
+      const id = i.category_id || "";
+      if (!map.has(id)) map.set(id, { id, name: i.category_name || "Uncategorised", eu: 0, imp: 0 });
+      const r = map.get(id);
+      if (i.is_import) r.imp++; else r.eu++;
+    });
+    return [...map.values()].sort((a, b) => (b.eu + b.imp) - (a.eu + a.imp) || a.name.localeCompare(b.name));
+  }, [inventory]);
+
+  const totals = useMemo(() => {
+    let euQty = 0, impQty = 0, euVal = 0, impVal = 0;
+    rows.forEach(r => { euQty += r.eu; impQty += r.imp; euVal += r.eu * priceEU(r.id); impVal += r.imp * priceIM(r.id); });
+    return { euQty, impQty, euVal, impVal, qty: euQty + impQty, val: euVal + impVal };
+  }, [rows, draft]);
+
+  const priced = rows.filter(r => num(get(r.id, "eu")) !== null || num(get(r.id, "imp")) !== null).length;
+
+  const save = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      const payload = rows.filter(r => r.id).map(r => ({
+        category_id: r.id,
+        buy_price: num(get(r.id, "eu")),
+        buy_price_import: num(get(r.id, "imp")),
+        updated_at: new Date().toISOString(),
+      }));
+      if (payload.length) await api.upsert("category_estimates", payload);
+      await onChanged();
+      showToast("Estimate prices saved");
+    } catch (e) { setErr(e.message || "Could not save prices"); }
+    setBusy(false);
+  };
+
+  // Sheet 1: one line per category, EU and IMPORT side by side, with a TOTAL row.
+  const exportSummary = () => {
+    const out = [["Category", "Qty EU", "Est. buy-in EU (kr)", "Value EU (kr)", "Qty IMPORT", "Est. buy-in IMPORT (kr)", "Value IMPORT (kr)", "Qty total", "Value total (kr)"]];
+    rows.forEach(r => {
+      const p = priceEU(r.id), pi = priceIM(r.id);
+      out.push([r.name, r.eu, p || "", Math.round(r.eu * p), r.imp, pi || "", Math.round(r.imp * pi), r.eu + r.imp, Math.round(r.eu * p + r.imp * pi)]);
+    });
+    out.push([]);
+    out.push(["TOTAL", totals.euQty, "", Math.round(totals.euVal), totals.impQty, "", Math.round(totals.impVal), totals.qty, Math.round(totals.val)]);
+    downloadCSV("thriftin-estimate-" + todayStamp() + ".csv", out);
+  };
+
+  // Sheet 2: every item in stock, with the estimated buy-in its category implies.
+  const exportItems = () => {
+    const out = [["Barcode", "Category", "Brand", "Description", "Size", "Sleeve", "Department", "Origin", "Est. buy-in (kr)", "Sell price (kr)", "Added"]];
+    inventory.filter(i => i.status === "in_stock")
+      .slice()
+      .sort((a, b) => (a.category_name || "").localeCompare(b.category_name || "") || (a.barcode || "").localeCompare(b.barcode || ""))
+      .forEach(i => {
+        const id = i.category_id || "";
+        out.push([
+          i.barcode || "", i.category_name || "", i.brand || "", i.comment || "",
+          i.size || "", i.sleeve || "", i.gender ? genderLabel(i.gender) : "",
+          i.is_import ? "IMPORT" : "EU",
+          Math.round(i.is_import ? priceIM(id) : priceEU(id)) || "",
+          i.sell_price ?? "",
+          (i.added_at || i.created_at || "").slice(0, 10),
+        ]);
+      });
+    downloadCSV("thriftin-stock-list-" + todayStamp() + ".csv", out);
+  };
+
+  const priceInput = (id, k, ph) => (
+    <input type="number" inputMode="numeric" placeholder={ph} value={get(id, k)} onChange={e => set(id, k, e.target.value)}
+      style={{ ...S.field, padding: "10px 12px", fontSize: 14, borderWidth: 1 }} />
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: BG, zIndex: 600, overflowY: "auto" }}>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 60px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>Inventory estimate</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 26, color: "#aaa", cursor: "pointer" }}>{"×"}</button>
+        </div>
+        <div style={{ fontSize: 12.5, color: MUTED, lineHeight: 1.5, marginBottom: 16 }}>
+          Counts come from what is in stock right now. Set one estimated buy-in price per category — leave the IMPORT price blank to reuse the EU price.
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          {[["In stock", String(totals.qty)], ["Of which import", String(totals.impQty)], ["Est. value", kr(totals.val)]].map(([l, v]) => (
+            <div key={l} style={{ flex: 1, background: CARD, border: "1px solid " + BORDER, borderRadius: 12, padding: "12px 10px", textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 800 }}>{v}</div>
+              <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 3 }}>{l}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+          <div style={{ flex: 1, background: CARD, border: "1px solid " + BORDER, borderRadius: 12, padding: "10px 12px" }}>
+            <div style={{ fontSize: 14, fontWeight: 800 }}>{kr(totals.euVal)}</div>
+            <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 2 }}>EU value · {totals.euQty} st</div>
+          </div>
+          <div style={{ flex: 1, background: IMPORT_C + "0F", border: "1px solid " + IMPORT_C + "40", borderRadius: 12, padding: "10px 12px" }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: IMPORT_C }}>{kr(totals.impVal)}</div>
+            <div style={{ fontSize: 10, color: IMPORT_C, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 2 }}>Import value · {totals.impQty} st</div>
+          </div>
+        </div>
+
+        {!rows.length && (
+          <div style={{ textAlign: "center", padding: "40px 20px", color: "#bbb", fontSize: 14, lineHeight: 1.5 }}>
+            Nothing in stock yet.<br />Add items under Stock, then come back here.
+          </div>
+        )}
+
+        {rows.map(r => {
+          const cat = cats.find(c => c.id === r.id);
+          const catColor = cat ? getCatColor(cat, cats) : MUTED;
+          const sub = r.eu * priceEU(r.id) + r.imp * priceIM(r.id);
+          return (
+            <div key={r.id || "none"} style={{ ...S.card, padding: "14px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: "50%", background: catColor, flexShrink: 0 }} />
+                  <span style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                </div>
+                <span style={{ fontSize: 14, fontWeight: 800, flexShrink: 0, marginLeft: 10 }}>{kr(sub)}</span>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1, marginBottom: 5 }}>EU · {r.eu} ST</div>
+                  {priceInput(r.id, "eu", "kr / item")}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: r.imp ? IMPORT_C : MUTED, letterSpacing: 1, marginBottom: 5 }}>IMPORT · {r.imp} ST</div>
+                  {priceInput(r.id, "imp", num(get(r.id, "eu")) !== null ? "= " + priceEU(r.id) : "kr / item")}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 10, padding: "12px 14px", margin: "12px 0", fontSize: 13, color: "#A33", lineHeight: 1.4 }}>{err}</div>}
+
+        {rows.length > 0 && (
+          <>
+            <button onClick={save} disabled={busy} style={{ ...S.btn(!busy), marginTop: 6, marginBottom: 10, opacity: busy ? 0.6 : 1 }}>
+              {busy ? "Saving..." : "Save prices"}
+            </button>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button onClick={exportSummary} style={{ flex: 1, padding: "14px 10px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: DARK }}>Export summary</button>
+              <button onClick={exportItems} style={{ flex: 1, padding: "14px 10px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: DARK }}>Export full list</button>
+            </div>
+            <div style={{ fontSize: 11, color: MUTED, textAlign: "center", lineHeight: 1.5 }}>
+              {priced} of {rows.length} categories priced. Both exports are .csv files that open straight in Excel.
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -2700,6 +2915,7 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
   const [zoomPhoto, setZoomPhoto] = useState("");
   const [catFilter, setCatFilter] = useState("");
   const [brandFilter, setBrandFilter] = useState("");
+  const [originFilter, setOriginFilter] = useState(""); // "" | "eu" | "import"
 
   const inStock = inventory.filter(i => i.status === "in_stock");
   const sold = inventory.filter(i => i.status === "sold");
@@ -2710,6 +2926,8 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
   const shown = base.filter(i => {
     if (catFilter && i.category_id !== catFilter) return false;
     if (brandFilter && (i.brand || "") !== brandFilter) return false;
+    if (originFilter === "import" && !i.is_import) return false;
+    if (originFilter === "eu" && i.is_import) return false;
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (i.comment || "").toLowerCase().includes(q) ||
@@ -2903,6 +3121,13 @@ function StockScreen({ inventory, cats, brands, currentUser, adminMode, onChange
         <button onClick={() => setStatusFilter("sold")} style={{ flex: 1, padding: "8px", background: statusFilter === "sold" ? DARK : CARD, border: "1px solid " + (statusFilter === "sold" ? DARK : BORDER), borderRadius: 8, fontSize: 12, fontWeight: 700, color: statusFilter === "sold" ? "#fff" : "#555", cursor: "pointer", fontFamily: "inherit" }}>Sold ({sold.length})</button>
       </div>
 
+      {/* Origin filter */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {[["", "All", base.length], ["eu", "EU", base.filter(i => !i.is_import).length], ["import", "IMPORT", base.filter(i => i.is_import).length]].map(([k, lbl, n]) => (
+          <button key={k || "all"} onClick={() => setOriginFilter(k)} style={{ ...S.chip(originFilter === k, k === "import" ? IMPORT_C : null), flex: 1, padding: "7px 6px", fontSize: 12, borderRadius: 8, textAlign: "center" }}>{lbl} {n}</button>
+        ))}
+      </div>
+
       {/* Category filter chips */}
       <div style={{ display: "flex", gap: 5, overflowX: "auto", paddingBottom: 8, marginBottom: 6 }}>
         <button onClick={() => { setCatFilter(""); setBrandFilter(""); }} style={{ ...S.chip(!catFilter, null), padding: "6px 12px", fontSize: 12, borderRadius: 8, flexShrink: 0 }}>All</button>
@@ -2958,6 +3183,7 @@ function StockCard({ item, cats, onClick, onZoom }) {
           {item.size && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{item.size}</span>}
           {item.sleeve && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{item.sleeve === "long" ? "Long sl." : "Short sl."}</span>}
           {item.gender && <span style={{ fontSize: 11, color: "#888", background: BG, padding: "2px 7px", borderRadius: 5 }}>{genderLabel(item.gender)}</span>}
+          {item.is_import && <span style={{ fontSize: 10, fontWeight: 800, color: "#fff", background: IMPORT_C, padding: "2px 7px", borderRadius: 5, letterSpacing: 0.5 }}>IMPORT</span>}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span style={{ fontSize: 10, color: MUTED, fontFamily: "monospace" }}>{item.barcode}</span>
@@ -2980,6 +3206,7 @@ function AddStock({ cats, brands, currentUser, onCatAdded, onBrandAdded, onDone,
   const [sleeve, setSleeve] = useState("");
   const [comment, setComment] = useState("");
   const [sellPrice, setSellPrice] = useState("");
+  const [isImport, setIsImport] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showAddCat, setShowAddCat] = useState(false);
   const [err, setErr] = useState("");
@@ -2997,8 +3224,8 @@ function AddStock({ cats, brands, currentUser, onCatAdded, onBrandAdded, onDone,
 
   const resetForm = (keepCat) => {
     setPhoto(null); setComment(""); setSellPrice(""); setBrand(""); setSleeve("");
-    if (!keepCat) { setCatId(""); setSize(""); setGender(""); }
-    else { setSize(""); } // keep category (and gender) for next item
+    if (!keepCat) { setCatId(""); setSize(""); setGender(""); setIsImport(false); }
+    else { setSize(""); } // keep category, department and origin for next item
   };
 
   const save = async (mode) => {
@@ -3017,6 +3244,7 @@ function AddStock({ cats, brands, currentUser, onCatAdded, onBrandAdded, onDone,
         brand: brand || null,
         sleeve: isShirtCat(cat) ? (sleeve || null) : null,
         sell_price: sellPrice ? parseFloat(sellPrice) : null,
+        is_import: isImport,
         photo_url, status: "in_stock",
         user_id: currentUser.id, user_name: currentUser.name,
         added_at: new Date().toISOString(),
@@ -3112,6 +3340,15 @@ function AddStock({ cats, brands, currentUser, onCatAdded, onBrandAdded, onDone,
         </div>
       </div>
 
+      <div style={S.card}>
+        <label style={S.label}>Origin</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setIsImport(false)} style={{ ...S.chip(!isImport, null), flex: 1, textAlign: "center" }}>Sweden / EU</button>
+          <button onClick={() => setIsImport(true)} style={{ ...S.chip(isImport, IMPORT_C), flex: 1, textAlign: "center" }}>IMPORT</button>
+        </div>
+        <div style={{ fontSize: 11, color: MUTED, marginTop: 8, lineHeight: 1.4 }}>IMPORT = bought in the UK or anywhere outside the EU.</div>
+      </div>
+
       <div style={{ ...S.card, marginBottom: 12 }}>
         <label style={S.label}>Sell price</label>
         <input type="number" inputMode="numeric" value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={S.field} />
@@ -3132,7 +3369,7 @@ function AddStock({ cats, brands, currentUser, onCatAdded, onBrandAdded, onDone,
         </button>
       </div>
       <div style={{ fontSize: 11, color: MUTED, textAlign: "center", marginBottom: 16, lineHeight: 1.4 }}>
-        Queue = keep adding (category stays), print all at the end. Print now = print this one label immediately.
+        Queue = keep adding (category, department and origin stay), print all at the end. Print now = print this one label immediately.
       </div>
     </div>
   );
@@ -3166,6 +3403,7 @@ function StockDetail({ item, cats, adminMode, onZoom, onClose, onSold, onRevert,
           {item.size && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{item.size}</span>}
           {item.sleeve && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{item.sleeve === "long" ? "Long sleeve" : "Short sleeve"}</span>}
           {item.gender && <span style={{ fontSize: 12, color: "#888", background: BG, padding: "3px 10px", borderRadius: 6 }}>{genderLabel(item.gender)}</span>}
+          {item.is_import && <span style={{ fontSize: 11, fontWeight: 800, color: "#fff", background: IMPORT_C, padding: "3px 10px", borderRadius: 6, letterSpacing: 0.5 }}>IMPORT</span>}
           {item.sell_price && <span style={{ fontSize: 14, fontWeight: 700 }}>{item.sell_price} kr</span>}
         </div>
 
@@ -3220,6 +3458,7 @@ function EditStock({ item, cats, brands, adminMode, onSave, onClose, onCatAdded,
   const [sleeve, setSleeve] = useState(item.sleeve || "");
   const [comment, setComment] = useState(item.comment || "");
   const [sellPrice, setSellPrice] = useState(item.sell_price ?? "");
+  const [isImport, setIsImport] = useState(!!item.is_import);
   const [addedDate, setAddedDate] = useState((item.added_at || item.created_at || "").slice(0, 10));
   const [busy, setBusy] = useState(false);
   const [showAddCat, setShowAddCat] = useState(false);
@@ -3247,6 +3486,7 @@ function EditStock({ item, cats, brands, adminMode, onSave, onClose, onCatAdded,
         brand: brand || null,
         sleeve: isShirtCat(cat) ? (sleeve || null) : null,
         sell_price: sellPrice !== "" ? parseFloat(sellPrice) : null,
+        is_import: isImport,
         ...(adminMode && addedDate ? { added_at: new Date(addedDate + "T12:00:00").toISOString() } : {}),
       });
     } catch (e) { setBusy(false); setErr(e.message || "Could not save"); }
@@ -3324,6 +3564,12 @@ function EditStock({ item, cats, brands, adminMode, onSave, onClose, onCatAdded,
           {[["mens", "Men's"], ["womens", "Women's"], ["unisex", "Unisex"]].map(([k, l]) => (
             <button key={k} onClick={() => setGender(gender === k ? "" : k)} style={{ ...S.chip(gender === k, null), flex: 1, textAlign: "center" }}>{l}</button>
           ))}
+        </div>
+
+        <label style={S.label}>Origin</label>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <button onClick={() => setIsImport(false)} style={{ ...S.chip(!isImport, null), flex: 1, textAlign: "center" }}>Sweden / EU</button>
+          <button onClick={() => setIsImport(true)} style={{ ...S.chip(isImport, IMPORT_C), flex: 1, textAlign: "center" }}>IMPORT</button>
         </div>
 
         <div style={{ marginBottom: 14 }}>
