@@ -1657,9 +1657,17 @@ function EstimateScreen({ lines, cats, currentUser, onChanged, onClose, showToas
     setBusy(false);
   };
 
+  // Returns false when the write failed, so the row can put back the value the
+  // server still holds rather than showing a number that was never saved.
   const patchLine = async (l, patch) => {
-    try { await api.patch("estimate_lines", l.id, { ...patch, updated_at: new Date().toISOString() }); await onChanged(); }
-    catch (e) { showToast("Could not save: " + (e.message || "error")); }
+    try {
+      await api.patch("estimate_lines", l.id, { ...patch, updated_at: new Date().toISOString() });
+      await onChanged();
+      return true;
+    } catch (e) {
+      showToast("Not saved — " + (e.message || "error"));
+      return false;
+    }
   };
   const removeLine = async (l) => {
     try { await api.del("estimate_lines", l.id); await onChanged(); showToast("Line removed"); }
@@ -1777,6 +1785,12 @@ function EstimateScreen({ lines, cats, currentUser, onChanged, onClose, showToas
         ))}
 
         {groups.length > 0 && (
+          <div style={{ fontSize: 11, color: MUTED, textAlign: "center", marginTop: 12, lineHeight: 1.5 }}>
+            Saved on the shop server as you type, not on this phone. Close the app, change device, come back next week — the count is still here.
+          </div>
+        )}
+
+        {groups.length > 0 && (
           <button onClick={exportCSV} style={{ width: "100%", padding: "16px", marginTop: 14, background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: DARK }}>
             {"↓"} Export spreadsheet ({lines.length} line{lines.length !== 1 ? "s" : ""})
           </button>
@@ -1800,15 +1814,17 @@ function LineRow({ line, onPatch, onRemove }) {
 
   useEffect(() => { setQty(String(line.qty ?? "")); setPrice(line.unit_price ?? ""); }, [line.qty, line.unit_price]);
 
-  const commitQty = () => {
+  const commitQty = async () => {
     const q = parseInt(qty, 10);
     if (!q || q < 1) { setQty(String(line.qty ?? "")); return; }
-    if (q !== line.qty) onPatch(line, { qty: q });
+    if (q === line.qty) return;
+    if (!(await onPatch(line, { qty: q }))) setQty(String(line.qty ?? ""));
   };
-  const commitPrice = () => {
+  const commitPrice = async () => {
     const p = price === "" ? null : parseFloat(price);
     if (p !== null && isNaN(p)) { setPrice(line.unit_price ?? ""); return; }
-    if (String(p) !== String(line.unit_price ?? null)) onPatch(line, { unit_price: p });
+    if (String(p) === String(line.unit_price ?? null)) return;
+    if (!(await onPatch(line, { unit_price: p }))) setPrice(line.unit_price ?? "");
   };
 
   const box = { width: 62, padding: "7px 8px", boxSizing: "border-box", border: "1px solid " + BORDER, borderRadius: 8, fontSize: 14, fontFamily: "inherit", background: CARD, color: DARK, outline: "none", textAlign: "center" };
