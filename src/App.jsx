@@ -554,7 +554,7 @@ export default function App() {
   const [sales, setSales] = useState([]);
   const [inventory, setInventory] = useState([]);
   const [brands, setBrands] = useState([]);
-  const [estimates, setEstimates] = useState([]);
+  const [estLines, setEstLines] = useState([]);
   const [dataStale, setDataStale] = useState(false);
   const [currentUser, setCU] = useState(null);
   const [tab, setTab] = useState(() => {
@@ -623,7 +623,7 @@ export default function App() {
       ["sales", "&order=created_at.desc", setSales],
       ["inventory", "&order=added_at.desc", setInventory],
       ["brands", "&order=name", setBrands],
-      ["category_estimates", "", setEstimates],
+      ["estimate_lines", "&order=created_at", setEstLines],
     ];
     const results = await Promise.allSettled(specs.map(([t, q]) => api.list(t, q)));
     const loaded = {};
@@ -683,7 +683,7 @@ export default function App() {
       {updateReady && <div onClick={() => location.reload()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 78, zIndex: 9000, background: DARK, color: "#fff", borderRadius: 20, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)" }}>{"↻"} Update available — tap to refresh</div>}
       {dataStale && <div onClick={() => refresh()} style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 118, zIndex: 9000, background: "#A33", color: "#fff", borderRadius: 20, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(0,0,0,0.25)", maxWidth: "90%", textAlign: "center" }}>{"⚠"} Couldn’t reach the server — tap to retry (nothing lost)</div>}
       {showAdmin && <AdminPanel users={users} cats={cats} adminMode={adminMode} onToggleAdmin={() => setAdminMode(a => !a)} onClose={() => setShowAdmin(false)} onChanged={refresh} onOpenReport={() => { setShowAdmin(false); setReportPeriod(null); setShowReport(true); }} onOpenEstimate={() => { setShowAdmin(false); setShowEstimate(true); }} />}
-      {showEstimate && <EstimateScreen inventory={inventory} cats={cats} estimates={estimates} onChanged={refresh} onClose={() => setShowEstimate(false)} showToast={showToast} />}
+      {showEstimate && <EstimateScreen lines={estLines} cats={cats} currentUser={currentUser} onChanged={refresh} onClose={() => setShowEstimate(false)} showToast={showToast} />}
       {showReport && <ReportScreen key={reportPeriod || "manual"} sales={sales} cats={cats} initialPeriod={reportPeriod} onClose={() => { setShowReport(false); setReportPeriod(null); }} />}
 
       <div style={{ padding: "16px 20px 12px", background: CARD, borderBottom: "1px solid " + BORDER, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 }}>
@@ -1595,99 +1595,100 @@ function AdminPanel({ users, cats, adminMode, onToggleAdmin, onClose, onChanged,
 }
 
 // ── Inventory estimate ──
-// There is no reliable buy-in price per item, so stock is valued with one
-// estimated buy-in per category, split by origin: Sweden/EU vs IMPORT
-// (UK or outside the EU). Quantities come from what is actually in stock;
-// only the prices are entered by hand, and they persist in category_estimates.
-function EstimateScreen({ inventory, cats, estimates, onChanged, onClose, showToast }) {
-  const [draft, setDraft] = useState(() => {
-    const d = {};
-    (estimates || []).forEach(e => { d[e.category_id] = { eu: e.buy_price ?? "", imp: e.buy_price_import ?? "" }; });
-    return d;
-  });
+// A count sheet, not an item register. Stock is tallied in batches — "20 black
+// leather jackets at 400 kr" — so the estimated buy-in lives on the line, not
+// on the category: a black jacket and a brown one are not worth the same.
+// IMPORT marks stock bought in the UK or anywhere outside the EU.
+function EstimateScreen({ lines, cats, currentUser, onChanged, onClose, showToast }) {
+  const [catId, setCatId] = useState("");
+  const [label, setLabel] = useState("");
+  const [qty, setQty] = useState("");
+  const [price, setPrice] = useState("");
+  const [isImport, setIsImport] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const kr = n => Math.round(n).toLocaleString("sv-SE") + " kr";
-  const num = v => { const n = parseFloat(v); return (v === "" || v == null || isNaN(n)) ? null : n; };
-  const get = (id, k) => draft[id]?.[k] ?? "";
-  const set = (id, k, v) => setDraft(d => ({ ...d, [id]: { ...(d[id] || { eu: "", imp: "" }), [k]: v } }));
-  // A blank IMPORT price means "same as the EU price" rather than "free".
-  const priceEU = id => num(get(id, "eu")) ?? 0;
-  const priceIM = id => num(get(id, "imp")) ?? priceEU(id);
-
-  const rows = useMemo(() => {
-    const map = new Map();
-    inventory.filter(i => i.status === "in_stock").forEach(i => {
-      const id = i.category_id || "";
-      if (!map.has(id)) map.set(id, { id, name: i.category_name || "Uncategorised", eu: 0, imp: 0 });
-      const r = map.get(id);
-      if (i.is_import) r.imp++; else r.eu++;
-    });
-    return [...map.values()].sort((a, b) => (b.eu + b.imp) - (a.eu + a.imp) || a.name.localeCompare(b.name));
-  }, [inventory]);
+  const qtyOf = l => parseInt(l.qty, 10) || 0;
+  const valOf = l => { const p = parseFloat(l.unit_price); return qtyOf(l) * (isNaN(p) ? 0 : p); };
 
   const totals = useMemo(() => {
-    let euQty = 0, impQty = 0, euVal = 0, impVal = 0;
-    rows.forEach(r => { euQty += r.eu; impQty += r.imp; euVal += r.eu * priceEU(r.id); impVal += r.imp * priceIM(r.id); });
-    return { euQty, impQty, euVal, impVal, qty: euQty + impQty, val: euVal + impVal };
-  }, [rows, draft]);
+    let qtyEU = 0, qtyIM = 0, valEU = 0, valIM = 0;
+    lines.forEach(l => {
+      if (l.is_import) { qtyIM += qtyOf(l); valIM += valOf(l); }
+      else { qtyEU += qtyOf(l); valEU += valOf(l); }
+    });
+    return { qtyEU, qtyIM, valEU, valIM, qty: qtyEU + qtyIM, val: valEU + valIM };
+  }, [lines]);
 
-  const priced = rows.filter(r => num(get(r.id, "eu")) !== null || num(get(r.id, "imp")) !== null).length;
+  const groups = useMemo(() => {
+    const m = new Map();
+    lines.forEach(l => {
+      const k = l.category_name || "Uncategorised";
+      if (!m.has(k)) m.set(k, { name: k, catId: l.category_id, lines: [], qty: 0, val: 0 });
+      const g = m.get(k);
+      g.lines.push(l); g.qty += qtyOf(l); g.val += valOf(l);
+    });
+    return [...m.values()].sort((a, b) => b.val - a.val || a.name.localeCompare(b.name));
+  }, [lines]);
 
-  const save = async () => {
+  const addLine = async () => {
     if (busy) return;
+    const q = parseInt(qty, 10);
+    if (!catId) { setErr("Pick a category first."); return; }
+    if (!q || q < 1) { setErr("Enter how many."); return; }
     setBusy(true); setErr("");
     try {
-      const payload = rows.filter(r => r.id).map(r => ({
-        category_id: r.id,
-        buy_price: num(get(r.id, "eu")),
-        buy_price_import: num(get(r.id, "imp")),
-        updated_at: new Date().toISOString(),
-      }));
-      if (payload.length) await api.upsert("category_estimates", payload);
+      const cat = cats.find(c => c.id === catId);
+      await api.post("estimate_lines", {
+        category_id: catId, category_name: cat?.name || null,
+        label: label.trim() || null,
+        qty: q,
+        unit_price: price !== "" ? parseFloat(price) : null,
+        is_import: isImport,
+        user_name: currentUser?.name || null,
+      });
       await onChanged();
-      showToast("Estimate prices saved");
-    } catch (e) { setErr(e.message || "Could not save prices"); }
+      // Keep category, price and origin: the next batch is usually a variation
+      // of the last one, so only the count and the description reset.
+      setQty(""); setLabel("");
+      showToast("Line added");
+    } catch (e) { setErr(e.message || "Could not add line"); }
     setBusy(false);
   };
 
-  // Sheet 1: one line per category, EU and IMPORT side by side, with a TOTAL row.
-  const exportSummary = () => {
-    const out = [["Category", "Qty EU", "Est. buy-in EU (kr)", "Value EU (kr)", "Qty IMPORT", "Est. buy-in IMPORT (kr)", "Value IMPORT (kr)", "Qty total", "Value total (kr)"]];
-    rows.forEach(r => {
-      const p = priceEU(r.id), pi = priceIM(r.id);
-      out.push([r.name, r.eu, p || "", Math.round(r.eu * p), r.imp, pi || "", Math.round(r.imp * pi), r.eu + r.imp, Math.round(r.eu * p + r.imp * pi)]);
-    });
+  const patchLine = async (l, patch) => {
+    try { await api.patch("estimate_lines", l.id, { ...patch, updated_at: new Date().toISOString() }); await onChanged(); }
+    catch (e) { showToast("Could not save: " + (e.message || "error")); }
+  };
+  const removeLine = async (l) => {
+    try { await api.del("estimate_lines", l.id); await onChanged(); showToast("Line removed"); }
+    catch (e) { showToast("Could not remove: " + (e.message || "error")); }
+  };
+
+  // Sheet 1 is every line as typed; sheet 2 is the per-category summary with the
+  // EU / IMPORT split and the grand total.
+  const exportCSV = () => {
+    const out = [["Category", "Description", "Origin", "Qty", "Buy-in each (kr)", "Line total (kr)"]];
+    groups.forEach(g => g.lines.forEach(l => out.push([
+      g.name, l.label || "", l.is_import ? "IMPORT" : "EU",
+      qtyOf(l), l.unit_price ?? "", Math.round(valOf(l)),
+    ])));
     out.push([]);
-    out.push(["TOTAL", totals.euQty, "", Math.round(totals.euVal), totals.impQty, "", Math.round(totals.impVal), totals.qty, Math.round(totals.val)]);
-    downloadCSV("thriftin-estimate-" + todayStamp() + ".csv", out);
+    out.push(["SUMMARY BY CATEGORY"]);
+    out.push(["Category", "Qty EU", "Value EU (kr)", "Qty IMPORT", "Value IMPORT (kr)", "Qty total", "Value total (kr)"]);
+    const sumQ = arr => arr.reduce((t, l) => t + qtyOf(l), 0);
+    const sumV = arr => arr.reduce((t, l) => t + valOf(l), 0);
+    groups.forEach(g => {
+      const eu = g.lines.filter(l => !l.is_import), im = g.lines.filter(l => l.is_import);
+      out.push([g.name, sumQ(eu), Math.round(sumV(eu)), sumQ(im), Math.round(sumV(im)), g.qty, Math.round(g.val)]);
+    });
+    out.push(["TOTAL", totals.qtyEU, Math.round(totals.valEU), totals.qtyIM, Math.round(totals.valIM), totals.qty, Math.round(totals.val)]);
+    downloadCSV("thriftin-inventory-estimate-" + todayStamp() + ".csv", out);
   };
 
-  // Sheet 2: every item in stock, with the estimated buy-in its category implies.
-  const exportItems = () => {
-    const out = [["Barcode", "Category", "Brand", "Description", "Size", "Sleeve", "Department", "Origin", "Est. buy-in (kr)", "Sell price (kr)", "Added"]];
-    inventory.filter(i => i.status === "in_stock")
-      .slice()
-      .sort((a, b) => (a.category_name || "").localeCompare(b.category_name || "") || (a.barcode || "").localeCompare(b.barcode || ""))
-      .forEach(i => {
-        const id = i.category_id || "";
-        out.push([
-          i.barcode || "", i.category_name || "", i.brand || "", i.comment || "",
-          i.size || "", i.sleeve || "", i.gender ? genderLabel(i.gender) : "",
-          i.is_import ? "IMPORT" : "EU",
-          Math.round(i.is_import ? priceIM(id) : priceEU(id)) || "",
-          i.sell_price ?? "",
-          (i.added_at || i.created_at || "").slice(0, 10),
-        ]);
-      });
-    downloadCSV("thriftin-stock-list-" + todayStamp() + ".csv", out);
-  };
-
-  const priceInput = (id, k, ph) => (
-    <input type="number" inputMode="numeric" placeholder={ph} value={get(id, k)} onChange={e => set(id, k, e.target.value)}
-      style={{ ...S.field, padding: "10px 12px", fontSize: 14, borderWidth: 1 }} />
-  );
+  const cat = cats.find(c => c.id === catId);
+  const preview = (parseInt(qty, 10) || 0) * (parseFloat(price) || 0);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: BG, zIndex: 600, overflowY: "auto" }}>
@@ -1697,79 +1698,137 @@ function EstimateScreen({ inventory, cats, estimates, onChanged, onClose, showTo
           <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 26, color: "#aaa", cursor: "pointer" }}>{"×"}</button>
         </div>
         <div style={{ fontSize: 12.5, color: MUTED, lineHeight: 1.5, marginBottom: 16 }}>
-          Counts come from what is in stock right now. Set one estimated buy-in price per category — leave the IMPORT price blank to reuse the EU price.
+          Count in batches. One line per group: how many, what they are, roughly what you paid each.
         </div>
 
+        {/* Running totals */}
         <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-          {[["In stock", String(totals.qty)], ["Of which import", String(totals.impQty)], ["Est. value", kr(totals.val)]].map(([l, v]) => (
+          {[["Items", String(totals.qty)], ["Est. value", kr(totals.val)]].map(([l, v]) => (
             <div key={l} style={{ flex: 1, background: CARD, border: "1px solid " + BORDER, borderRadius: 12, padding: "12px 10px", textAlign: "center" }}>
-              <div style={{ fontSize: 16, fontWeight: 800 }}>{v}</div>
+              <div style={{ fontSize: 18, fontWeight: 800 }}>{v}</div>
               <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 3 }}>{l}</div>
             </div>
           ))}
         </div>
-
         <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
           <div style={{ flex: 1, background: CARD, border: "1px solid " + BORDER, borderRadius: 12, padding: "10px 12px" }}>
-            <div style={{ fontSize: 14, fontWeight: 800 }}>{kr(totals.euVal)}</div>
-            <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 2 }}>EU value · {totals.euQty} st</div>
+            <div style={{ fontSize: 14, fontWeight: 800 }}>{kr(totals.valEU)}</div>
+            <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 2 }}>EU · {totals.qtyEU} st</div>
           </div>
           <div style={{ flex: 1, background: IMPORT_C + "0F", border: "1px solid " + IMPORT_C + "40", borderRadius: 12, padding: "10px 12px" }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: IMPORT_C }}>{kr(totals.impVal)}</div>
-            <div style={{ fontSize: 10, color: IMPORT_C, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 2 }}>Import value · {totals.impQty} st</div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: IMPORT_C }}>{kr(totals.valIM)}</div>
+            <div style={{ fontSize: 10, color: IMPORT_C, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 2 }}>Import · {totals.qtyIM} st</div>
           </div>
         </div>
 
-        {!rows.length && (
-          <div style={{ textAlign: "center", padding: "40px 20px", color: "#bbb", fontSize: 14, lineHeight: 1.5 }}>
-            Nothing in stock yet.<br />Add items under Stock, then come back here.
+        {/* Add a line */}
+        <div style={{ ...S.card, padding: "16px 18px" }}>
+          <label style={S.label}>Category</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+            {cats.map(c => <button key={c.id} onClick={() => setCatId(c.id)} style={{ ...S.chip(catId === c.id, getCatColor(c, cats)), padding: "7px 12px", fontSize: 13 }}>{c.name}</button>)}
+          </div>
+
+          {/* Count and price side by side: the form has to stay short enough that
+              the sheet below it is still on screen while you add lines. */}
+          <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+            <div style={{ flex: 1 }}>
+              <label style={S.label}>How many</label>
+              <input type="number" inputMode="numeric" value={qty} onChange={e => setQty(e.target.value)} placeholder="20"
+                style={{ ...S.field, fontSize: 22, fontWeight: 800, textAlign: "center" }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={S.label}>Kr each</label>
+              <input type="number" inputMode="numeric" value={price} onChange={e => setPrice(e.target.value)} placeholder="400"
+                style={{ ...S.field, fontSize: 22, fontWeight: 800, textAlign: "center" }} />
+            </div>
+          </div>
+
+          <label style={S.label}>Description (optional)</label>
+          <input value={label} onChange={e => setLabel(e.target.value)} placeholder="black, womens, 60s…" style={{ ...S.field, marginBottom: 14 }} />
+
+          <label style={S.label}>Origin</label>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <button onClick={() => setIsImport(false)} style={{ ...S.chip(!isImport, null), flex: 1, textAlign: "center" }}>Sweden / EU</button>
+            <button onClick={() => setIsImport(true)} style={{ ...S.chip(isImport, IMPORT_C), flex: 1, textAlign: "center" }}>IMPORT</button>
+          </div>
+
+          {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 13, color: "#A33" }}>{err}</div>}
+
+          <button onClick={addLine} disabled={busy} style={{ ...S.btn(!busy), opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Adding..." : preview > 0 ? "Add line · " + kr(preview) : "Add line"}
+          </button>
+          <div style={{ fontSize: 11, color: MUTED, textAlign: "center", marginTop: 8, lineHeight: 1.4 }}>
+            {cat ? cat.name + " stays selected for the next line." : "Pick a category to start."}
+          </div>
+        </div>
+
+        {/* Lines so far */}
+        {groups.length > 0 && (
+          <div style={{ fontSize: 12, fontWeight: 700, color: MUTED, letterSpacing: 1.5, textTransform: "uppercase", margin: "24px 0 10px" }}>Counted so far</div>
+        )}
+        {groups.map(g => (
+          <div key={g.name} style={{ ...S.card, padding: "12px 14px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+              <span style={{ fontSize: 15, fontWeight: 800 }}>{g.name}</span>
+              <span style={{ fontSize: 13, color: MUTED }}>{g.qty} st · <span style={{ color: DARK, fontWeight: 800 }}>{kr(g.val)}</span></span>
+            </div>
+            {g.lines.map(l => <LineRow key={l.id} line={l} onPatch={patchLine} onRemove={removeLine} />)}
+          </div>
+        ))}
+
+        {groups.length > 0 && (
+          <button onClick={exportCSV} style={{ width: "100%", padding: "16px", marginTop: 14, background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: DARK }}>
+            {"↓"} Export spreadsheet ({lines.length} line{lines.length !== 1 ? "s" : ""})
+          </button>
+        )}
+        {!groups.length && (
+          <div style={{ textAlign: "center", padding: "30px 20px", color: "#bbb", fontSize: 14, lineHeight: 1.5 }}>
+            No lines yet.<br />Add your first batch above.
           </div>
         )}
-
-        {rows.map(r => {
-          const cat = cats.find(c => c.id === r.id);
-          const catColor = cat ? getCatColor(cat, cats) : MUTED;
-          const sub = r.eu * priceEU(r.id) + r.imp * priceIM(r.id);
-          return (
-            <div key={r.id || "none"} style={{ ...S.card, padding: "14px 16px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: "50%", background: catColor, flexShrink: 0 }} />
-                  <span style={{ fontSize: 15, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
-                </div>
-                <span style={{ fontSize: 14, fontWeight: 800, flexShrink: 0, marginLeft: 10 }}>{kr(sub)}</span>
-              </div>
-              <div style={{ display: "flex", gap: 10 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1, marginBottom: 5 }}>EU · {r.eu} ST</div>
-                  {priceInput(r.id, "eu", "kr / item")}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: r.imp ? IMPORT_C : MUTED, letterSpacing: 1, marginBottom: 5 }}>IMPORT · {r.imp} ST</div>
-                  {priceInput(r.id, "imp", num(get(r.id, "eu")) !== null ? "= " + priceEU(r.id) : "kr / item")}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-
-        {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", borderRadius: 10, padding: "12px 14px", margin: "12px 0", fontSize: 13, color: "#A33", lineHeight: 1.4 }}>{err}</div>}
-
-        {rows.length > 0 && (
-          <>
-            <button onClick={save} disabled={busy} style={{ ...S.btn(!busy), marginTop: 6, marginBottom: 10, opacity: busy ? 0.6 : 1 }}>
-              {busy ? "Saving..." : "Save prices"}
-            </button>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <button onClick={exportSummary} style={{ flex: 1, padding: "14px 10px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: DARK }}>Export summary</button>
-              <button onClick={exportItems} style={{ flex: 1, padding: "14px 10px", background: CARD, border: "2px solid " + BORDER, borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", color: DARK }}>Export full list</button>
-            </div>
-            <div style={{ fontSize: 11, color: MUTED, textAlign: "center", lineHeight: 1.5 }}>
-              {priced} of {rows.length} categories priced. Both exports are .csv files that open straight in Excel.
-            </div>
-          </>
-        )}
       </div>
+    </div>
+  );
+}
+
+// One counted batch. Quantity and price stay editable in place so the numbers
+// can be corrected mid-count without deleting and re-adding the line.
+function LineRow({ line, onPatch, onRemove }) {
+  const [qty, setQty] = useState(String(line.qty ?? ""));
+  const [price, setPrice] = useState(line.unit_price ?? "");
+  const [confirm, setConfirm] = useState(false);
+
+  useEffect(() => { setQty(String(line.qty ?? "")); setPrice(line.unit_price ?? ""); }, [line.qty, line.unit_price]);
+
+  const commitQty = () => {
+    const q = parseInt(qty, 10);
+    if (!q || q < 1) { setQty(String(line.qty ?? "")); return; }
+    if (q !== line.qty) onPatch(line, { qty: q });
+  };
+  const commitPrice = () => {
+    const p = price === "" ? null : parseFloat(price);
+    if (p !== null && isNaN(p)) { setPrice(line.unit_price ?? ""); return; }
+    if (String(p) !== String(line.unit_price ?? null)) onPatch(line, { unit_price: p });
+  };
+
+  const box = { width: 62, padding: "7px 8px", boxSizing: "border-box", border: "1px solid " + BORDER, borderRadius: 8, fontSize: 14, fontFamily: "inherit", background: CARD, color: DARK, outline: "none", textAlign: "center" };
+  const total = (parseInt(qty, 10) || 0) * (parseFloat(price) || 0);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid " + BG }}>
+      <input type="number" inputMode="numeric" value={qty} onChange={e => setQty(e.target.value)} onBlur={commitQty} style={{ ...box, width: 54, fontWeight: 800 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {line.label || <span style={{ color: "#bbb", fontStyle: "italic", fontWeight: 400 }}>no description</span>}
+        </div>
+        {line.is_import && <span style={{ fontSize: 9, fontWeight: 800, color: "#fff", background: IMPORT_C, padding: "1px 6px", borderRadius: 4, letterSpacing: 0.5 }}>IMPORT</span>}
+      </div>
+      <input type="number" inputMode="numeric" value={price} onChange={e => setPrice(e.target.value)} onBlur={commitPrice} placeholder="kr" style={box} />
+      <div style={{ width: 74, textAlign: "right", fontSize: 13, fontWeight: 700 }}>{Math.round(total).toLocaleString("sv-SE")}</div>
+      <button onClick={() => (confirm ? onRemove(line) : setConfirm(true))} onBlur={() => setConfirm(false)}
+        style={{ background: "none", border: "none", fontSize: confirm ? 12 : 18, color: confirm ? "#c33" : "#ccc", cursor: "pointer", fontFamily: "inherit", fontWeight: confirm ? 800 : 400, padding: "0 2px", flexShrink: 0 }}>
+        {confirm ? "Sure?" : "×"}
+      </button>
     </div>
   );
 }
