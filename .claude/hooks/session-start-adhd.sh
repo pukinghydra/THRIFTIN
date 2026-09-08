@@ -1,16 +1,16 @@
 #!/bin/bash
-# SessionStart hook: makes the i-have-adhd ruleset always-on for cloud
-# (Claude Code on the web) sessions on this repo, where the plugin can't run.
-# Local sessions use the installed plugin instead, so only fire in remote.
+# SessionStart hook: always-on i-have-adhd ruleset for cloud (web) sessions,
+# where the plugin can't run. Gated to remote so local uses the plugin.
+# Emits the documented SessionStart JSON so the text reliably lands in context.
 set -euo pipefail
 
 if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
-cat <<'RULES'
-ADHD MODE ACTIVE (always-on, repo hook). The ruleset below applies to every response.
-"stop adhd mode" turns it off for this session.
+python3 <<'PY'
+import json
+ctx = """ADHD MODE ACTIVE (always-on, repo hook). The rules below apply to every response this session. "stop adhd mode" turns it off.
 
 The reader has ADHD. Shape every response so it can be acted on:
 1. Lead with the answer or next action: command, path, or snippet first.
@@ -24,6 +24,6 @@ The reader has ADHD. Shape every response so it can be acted on:
 9. Cap lists at 5 items.
 10. No preamble, no recaps, no closers.
 
-Exceptions: explain fully when asked. Confirm before destructive actions. After three
-failed fixes, stop and name the doubtful assumption. Ambiguous request: ask one short question.
-RULES
+Exceptions: explain fully when asked. Confirm before destructive actions. After three failed fixes, stop and name the doubtful assumption. Ambiguous request: ask one short question."""
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}))
+PY
