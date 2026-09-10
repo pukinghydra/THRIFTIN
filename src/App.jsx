@@ -1780,7 +1780,7 @@ function EstimateScreen({ lines, cats, currentUser, onChanged, onClose, showToas
               <span style={{ fontSize: 15, fontWeight: 800 }}>{g.name}</span>
               <span style={{ fontSize: 13, color: MUTED }}>{g.qty} st · <span style={{ color: DARK, fontWeight: 800 }}>{kr(g.val)}</span></span>
             </div>
-            {g.lines.map(l => <LineRow key={l.id} line={l} onPatch={patchLine} onRemove={removeLine} />)}
+            {g.lines.map(l => <LineRow key={l.id} line={l} cats={cats} onPatch={patchLine} onRemove={removeLine} />)}
           </div>
         ))}
 
@@ -1807,10 +1807,14 @@ function EstimateScreen({ lines, cats, currentUser, onChanged, onClose, showToas
 
 // One counted batch. Quantity and price stay editable in place so the numbers
 // can be corrected mid-count without deleting and re-adding the line.
-function LineRow({ line, onPatch, onRemove }) {
+function LineRow({ line, cats, onPatch, onRemove }) {
   const [qty, setQty] = useState(String(line.qty ?? ""));
   const [price, setPrice] = useState(line.unit_price ?? "");
   const [confirm, setConfirm] = useState(false);
+  const [draft, setDraft] = useState(null);   // non-null while the row is being edited
+  const [busy, setBusy] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addQty, setAddQty] = useState("");
 
   useEffect(() => { setQty(String(line.qty ?? "")); setPrice(line.unit_price ?? ""); }, [line.qty, line.unit_price]);
 
@@ -1827,12 +1831,91 @@ function LineRow({ line, onPatch, onRemove }) {
     if (!(await onPatch(line, { unit_price: p }))) setPrice(line.unit_price ?? "");
   };
 
+  // Quantity and price are editable straight from the list because they change
+  // most while counting. Everything else — what these things are, where they
+  // came from, which category they belong under — opens this fuller editor.
+  const openEdit = () => setDraft({
+    catId: line.category_id || "",
+    label: line.label || "",
+    qty: String(line.qty ?? ""),
+    price: line.unit_price ?? "",
+    isImport: !!line.is_import,
+  });
+
+  const saveEdit = async () => {
+    if (busy) return;
+    const q = parseInt(draft.qty, 10);
+    if (!q || q < 1) return;
+    setBusy(true);
+    const cat = cats.find(c => c.id === draft.catId);
+    const ok = await onPatch(line, {
+      category_id: draft.catId || null,
+      category_name: cat?.name || null,
+      label: draft.label.trim() || null,
+      qty: q,
+      unit_price: draft.price === "" ? null : parseFloat(draft.price),
+      is_import: draft.isImport,
+    });
+    setBusy(false);
+    if (ok) setDraft(null);
+  };
+
+  // Counting the same rack twice is normal: found 5 more leather jackets, add
+  // them to the 8 already on the line instead of doing the sum in your head.
+  const commitAdd = async () => {
+    const n = parseInt(addQty, 10);
+    if (!n || n < 1) { setAddQty(""); setAddOpen(false); return; }
+    const ok = await onPatch(line, { qty: (parseInt(line.qty, 10) || 0) + n });
+    if (ok) { setAddQty(""); setAddOpen(false); }
+  };
+
   const box = { width: 62, padding: "7px 8px", boxSizing: "border-box", border: "1px solid " + BORDER, borderRadius: 8, fontSize: 14, fontFamily: "inherit", background: CARD, color: DARK, outline: "none", textAlign: "center" };
   const total = (parseInt(qty, 10) || 0) * (parseFloat(price) || 0);
+  const bigField = { ...S.field, fontSize: 20, fontWeight: 800, textAlign: "center", padding: "10px 12px" };
+
+  if (draft) return (
+    <div style={{ borderTop: "1px solid " + BG, padding: "14px 0 4px" }}>
+      <label style={S.label}>Category</label>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {cats.map(c => (
+          <button key={c.id} onClick={() => setDraft(d => ({ ...d, catId: c.id }))} style={{ ...S.chip(draft.catId === c.id, getCatColor(c, cats)), padding: "6px 11px", fontSize: 12.5 }}>{c.name}</button>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        <div style={{ flex: 1 }}>
+          <label style={S.label}>How many</label>
+          <input type="number" inputMode="numeric" value={draft.qty} onChange={e => setDraft(d => ({ ...d, qty: e.target.value }))} style={bigField} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <label style={S.label}>Kr each</label>
+          <input type="number" inputMode="numeric" value={draft.price} onChange={e => setDraft(d => ({ ...d, price: e.target.value }))} style={bigField} />
+        </div>
+      </div>
+
+      <label style={S.label}>Description</label>
+      <input value={draft.label} onChange={e => setDraft(d => ({ ...d, label: e.target.value }))} placeholder="black, womens, 60s…" style={{ ...S.field, marginBottom: 12 }} />
+
+      <label style={S.label}>Origin</label>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <button onClick={() => setDraft(d => ({ ...d, isImport: false }))} style={{ ...S.chip(!draft.isImport, null), flex: 1, textAlign: "center" }}>Sweden / EU</button>
+        <button onClick={() => setDraft(d => ({ ...d, isImport: true }))} style={{ ...S.chip(draft.isImport, IMPORT_C), flex: 1, textAlign: "center" }}>IMPORT</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+        <button onClick={() => setDraft(null)} style={{ flex: 1, padding: "13px", background: CARD, border: "2px solid " + BORDER, borderRadius: 10, fontSize: 14, fontWeight: 600, color: "#666", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+        <button onClick={saveEdit} disabled={busy} style={{ ...S.btn(!busy), flex: 1, width: "auto", padding: "13px", opacity: busy ? 0.6 : 1 }}>{busy ? "Saving..." : "Save"}</button>
+      </div>
+    </div>
+  );
+
+  const addTotal = (parseInt(line.qty, 10) || 0) + (parseInt(addQty, 10) || 0);
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid " + BG }}>
-      <input type="number" inputMode="numeric" value={qty} onChange={e => setQty(e.target.value)} onBlur={commitQty} style={{ ...box, width: 54, fontWeight: 800 }} />
+    <div style={{ borderTop: "1px solid " + BG }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0" }}>
+      <input type="number" inputMode="numeric" value={qty} onChange={e => setQty(e.target.value)} onBlur={commitQty}
+        onFocus={() => setAddOpen(true)} style={{ ...box, width: 54, fontWeight: 800 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {line.label || <span style={{ color: "#bbb", fontStyle: "italic", fontWeight: 400 }}>no description</span>}
@@ -1840,11 +1923,28 @@ function LineRow({ line, onPatch, onRemove }) {
         {line.is_import && <span style={{ fontSize: 9, fontWeight: 800, color: "#fff", background: IMPORT_C, padding: "1px 6px", borderRadius: 4, letterSpacing: 0.5 }}>IMPORT</span>}
       </div>
       <input type="number" inputMode="numeric" value={price} onChange={e => setPrice(e.target.value)} onBlur={commitPrice} placeholder="kr" style={box} />
-      <div style={{ width: 74, textAlign: "right", fontSize: 13, fontWeight: 700 }}>{Math.round(total).toLocaleString("sv-SE")}</div>
+      <div style={{ width: 66, textAlign: "right", fontSize: 13, fontWeight: 700 }}>{Math.round(total).toLocaleString("sv-SE")}</div>
+      <button onClick={openEdit} aria-label="Edit line"
+        style={{ background: "none", border: "none", fontSize: 15, color: MUTED, cursor: "pointer", fontFamily: "inherit", padding: "0 2px", flexShrink: 0 }}>
+        {"\u270E"}
+      </button>
       <button onClick={() => (confirm ? onRemove(line) : setConfirm(true))} onBlur={() => setConfirm(false)}
         style={{ background: "none", border: "none", fontSize: confirm ? 12 : 18, color: confirm ? "#c33" : "#ccc", cursor: "pointer", fontFamily: "inherit", fontWeight: confirm ? 800 : 400, padding: "0 2px", flexShrink: 0 }}>
         {confirm ? "Sure?" : "×"}
       </button>
+    </div>
+
+    {addOpen && (
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 10px" }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: MUTED, width: 54, textAlign: "center" }}>{line.qty} +</span>
+        <input type="number" inputMode="numeric" value={addQty} onChange={e => setAddQty(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") commitAdd(); }} placeholder="0"
+          style={{ ...box, width: 62, fontWeight: 800, borderColor: DARK }} />
+        <span style={{ fontSize: 13, color: MUTED, flex: 1 }}>= <b style={{ color: DARK }}>{addTotal}</b></span>
+        <button onClick={commitAdd} style={{ padding: "7px 14px", background: DARK, border: "none", borderRadius: 8, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>Add</button>
+        <button onClick={() => { setAddOpen(false); setAddQty(""); }} style={{ background: "none", border: "none", fontSize: 18, color: "#ccc", cursor: "pointer", fontFamily: "inherit", padding: "0 2px", flexShrink: 0 }}>{"×"}</button>
+      </div>
+    )}
     </div>
   );
 }
