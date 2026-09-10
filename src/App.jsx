@@ -2189,25 +2189,40 @@ function LogScreen({ cats, brands, sales, currentUser, onSaved, onCatAdded, onBr
       .map(([id]) => cats.find(c => c.id === id)).filter(Boolean);
   }, [sales, cats]);
 
-  // What this exact thing actually fetched before. Brand narrows it when there is
-  // enough history to trust — YSL shirts are not Ralph Lauren shirts. Ranked by
-  // how often each price occurred, never averaged: one 14 500 kr jacket drags an
-  // average somewhere no jacket was ever sold.
+  // What this thing is fetching NOW. Prices drift: YSL shirts ran at 1200 all
+  // summer and moved to 1250, but there are still more 1200s in the book than
+  // 1250s, so ranking all of history puts the stale price on top. Rank inside a
+  // recent window instead, and only widen it when recent sales are too thin to
+  // say anything. Counted, never averaged — one 14 500 kr jacket drags the Ralph
+  // Lauren jacket average to 3127 when its usual price is 1400.
   const priceHints = useMemo(() => {
     if (!catId) return null;
+    const cn = cats.find(c => c.id === catId);
+    const DAY = 86400000, now = Date.now();
+    const ageDays = r => (now - new Date(String(r.sold_at || r.created_at || "").slice(0, 10)).getTime()) / DAY;
     const tally = rows => {
       const m = new Map();
       rows.forEach(r => { const p = parseFloat(r.price); if (!isNaN(p) && p > 0) m.set(p, (m.get(p) || 0) + 1); });
-      return [...m.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]).slice(0, 5);
+      const all = [...m.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+      // A price paid once is a haggle, not a price. Drop the one-offs unless
+      // they are all there is.
+      const repeated = all.filter(([, c]) => c > 1);
+      return (repeated.length ? repeated : all).slice(0, 5);
     };
-    const cn = cats.find(c => c.id === catId);
+    const WINDOWS = [[45, "last 6 weeks"], [90, "last 3 months"], [null, "all time"]];
+    const pick = (rows, basis) => {
+      for (const [days, note] of WINDOWS) {
+        const w = days == null ? rows : rows.filter(r => ageDays(r) <= days);
+        if (w.length >= 4) return { basis, note, n: w.length, list: tally(w) };
+      }
+      return null;
+    };
     const inCat = (sales || []).filter(x => x.category_id === catId && x.price != null);
     if (brand) {
-      const withBrand = inCat.filter(x => (x.brand || "") === brand);
-      if (withBrand.length >= 4) return { basis: brand + " · " + (cn?.name || ""), n: withBrand.length, list: tally(withBrand) };
+      const branded = pick(inCat.filter(x => (x.brand || "") === brand), brand + " · " + (cn?.name || ""));
+      if (branded) return branded;
     }
-    if (inCat.length >= 4) return { basis: cn?.name || "", n: inCat.length, list: tally(inCat) };
-    return null;
+    return pick(inCat, cn?.name || "");
   }, [sales, catId, brand, cats]);
   const sizeInfo = getSizeOpts(cat);
   const catColor = cat ? getCatColor(cat, cats) : null;
@@ -2329,7 +2344,7 @@ function LogScreen({ cats, brands, sales, currentUser, onSaved, onCatAdded, onBr
         {priceHints && (
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 1, marginBottom: 7 }}>
-              {priceHints.basis.toUpperCase()} {"\u00b7"} {priceHints.n} SOLD
+              {priceHints.basis.toUpperCase()} {"\u00b7"} {priceHints.note.toUpperCase()} {"\u00b7"} {priceHints.n} SOLD
             </div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {priceHints.list.map(([p, n]) => (
