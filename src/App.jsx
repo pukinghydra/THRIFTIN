@@ -151,6 +151,31 @@ const BRAND_ALIASES = {
 };
 const STOP_WORDS = new Set(["the","a","an","and","or","in","on","of","for","with","to","is","it","this","that","from","by","at","as","was","are","be","been","being","have","has","had","do","does","did","will","would","could","should","may","might","can","shall","must","need","used","very","really","just","only","also","so","but","not","no","if","then","than","too","own","same","other","each","every","all","any","few","more","most","such","into","through","during","before","after","above","below","between","out","off","over","under","again","further","once","here","there","when","where","why","how","what","which","who","whom","short","long","sleeved","sleeve","striped","checked","plain","solid","colored","colour","color","vintage","retro","classic","small","medium","large","extra","size","sized","brand","new","old","good","great","nice","cool","warm","light","dark","bright","men","women","mens","womens","man","woman","unisex","shirt","pants","jeans","jacket","coat","dress","skirt","top","bottom","shoe","shoes","boot","boots","sneaker","sneakers","hat","cap","bag","belt","scarf","tie","socks","underwear","sweater","hoodie","blazer","vest","cardigan","shorts","tee","polo","henley","button","zip","zipper","pockets","pocket","collar","crew","neck","round","vneck","v-neck","fitted","slim","regular","loose","oversized","cropped","high","low","mid","waist","rise","leg","straight","skinny","wide","flared","bootcut","tapered","relaxed","blue","red","green","black","white","grey","gray","brown","navy","beige","cream","pink","purple","orange","yellow","khaki","olive","tan","maroon","burgundy","teal","coral","mint","gold","silver","denim","cotton","linen","wool","silk","polyester","nylon","leather","suede","velvet","fleece","knit","woven","print","printed","pattern","patterned","floral","plaid","camo","camouflage","graphic","logo","embroidered","distressed","washed","faded","raw","selvedge"]);
 
+// Aliases that are ordinary garment words as often as they are brands. Fine for
+// the report's fuzzy tallies, wrong for silently filling in a field.
+const AMBIGUOUS_ALIASES = new Set(["polo", "new", "studios", "saint", "north"]);
+
+// Pull a known brand out of free text. Staff type the brand into the description
+// ("YSL shirt, blue"), which is why the brand field is empty on a fifth of sales
+// that clearly name one. Longest name wins, so "Ralph Lauren" beats a bare
+// "Ralph"; the alias table only covers abbreviations the brand list cannot.
+function detectBrand(text, brands) {
+  const t = " " + (text || "").toLowerCase().replace(/[^\w\s&'åäöüß-]/g, " ").replace(/\s+/g, " ") + " ";
+  if (t.trim().length < 2) return "";
+  let best = "";
+  (brands || []).forEach(b => {
+    const n = (b.name || "").toLowerCase();
+    if (n.length < 3) return;
+    if (t.includes(" " + n + " ") && n.length > best.length) best = b.name;
+  });
+  if (best) return best;
+  for (const w of t.trim().split(" ")) {
+    if (AMBIGUOUS_ALIASES.has(w)) continue;
+    if (BRAND_ALIASES[w]) return BRAND_ALIASES[w];
+  }
+  return "";
+}
+
 function extractBrands(comments) {
   const brandCounts = {};
   comments.forEach(comment => {
@@ -699,7 +724,7 @@ export default function App() {
 
       <div style={{ padding: "0 0 80px" }}>
         <div style={{ display: tab === "log" ? "block" : "none" }}>
-          <LogScreen cats={cats} brands={brands} currentUser={currentUser} onSaved={() => { refresh(); showToast("Sale logged"); }} onCatAdded={refresh} onBrandAdded={refresh} />
+          <LogScreen cats={cats} brands={brands} sales={sales} currentUser={currentUser} onSaved={() => { refresh(); showToast("Sale logged"); }} onCatAdded={refresh} onBrandAdded={refresh} />
         </div>
         <div style={{ display: tab === "history" ? "block" : "none" }}>
           <HistoryScreen sales={sales} cats={cats} users={users} adminMode={adminMode} onChanged={refresh} onCatAdded={refresh} />
@@ -2131,7 +2156,7 @@ function DenimSizePicker({ type, value, onChange, catColor }) {
 }
 
 // ── Log Screen ──
-function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdded }) {
+function LogScreen({ cats, brands, sales, currentUser, onSaved, onCatAdded, onBrandAdded }) {
   const [photo, setPhoto] = useState(null);
   const [catId, setCatId] = useState("");
   const [size, setSize] = useState("");
@@ -2141,9 +2166,64 @@ function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdde
   const [price, setPrice] = useState("");
   const [busy, setBusy] = useState(false);
   const [showAddCat, setShowAddCat] = useState(false);
+  const [brandCleared, setBrandCleared] = useState(false);
   const fileRef = useRef();
 
   const cat = cats.find(c => c.id === catId);
+
+  // Read the brand back out of the description. Only ever fills an empty field,
+  // and stops for this sale once the user clears it by hand — otherwise the next
+  // keystroke would put it straight back.
+  useEffect(() => {
+    if (brand || brandCleared) return;
+    const found = detectBrand(comment, brands);
+    if (found) setBrand(found);
+  }, [comment, brands, brand, brandCleared]);
+
+  // The eight categories carrying 70% of sales, pinned above the alphabetical
+  // list in a fixed order so muscle memory survives.
+  const topCats = useMemo(() => {
+    const counts = new Map();
+    (sales || []).forEach(x => { if (x.category_id) counts.set(x.category_id, (counts.get(x.category_id) || 0) + 1); });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)
+      .map(([id]) => cats.find(c => c.id === id)).filter(Boolean);
+  }, [sales, cats]);
+
+  // What this thing is fetching NOW. Prices drift: YSL shirts ran at 1200 all
+  // summer and moved to 1250, but there are still more 1200s in the book than
+  // 1250s, so ranking all of history puts the stale price on top. Rank inside a
+  // recent window instead, and only widen it when recent sales are too thin to
+  // say anything. Counted, never averaged — one 14 500 kr jacket drags the Ralph
+  // Lauren jacket average to 3127 when its usual price is 1400.
+  const priceHints = useMemo(() => {
+    if (!catId) return null;
+    const cn = cats.find(c => c.id === catId);
+    const DAY = 86400000, now = Date.now();
+    const ageDays = r => (now - new Date(String(r.sold_at || r.created_at || "").slice(0, 10)).getTime()) / DAY;
+    const tally = rows => {
+      const m = new Map();
+      rows.forEach(r => { const p = parseFloat(r.price); if (!isNaN(p) && p > 0) m.set(p, (m.get(p) || 0) + 1); });
+      const all = [...m.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+      // A price paid once is a haggle, not a price. Drop the one-offs unless
+      // they are all there is.
+      const repeated = all.filter(([, c]) => c > 1);
+      return (repeated.length ? repeated : all).slice(0, 5);
+    };
+    const WINDOWS = [[45, "last 6 weeks"], [90, "last 3 months"], [null, "all time"]];
+    const pick = (rows, basis) => {
+      for (const [days, note] of WINDOWS) {
+        const w = days == null ? rows : rows.filter(r => ageDays(r) <= days);
+        if (w.length >= 4) return { basis, note, n: w.length, list: tally(w) };
+      }
+      return null;
+    };
+    const inCat = (sales || []).filter(x => x.category_id === catId && x.price != null);
+    if (brand) {
+      const branded = pick(inCat.filter(x => (x.brand || "") === brand), brand + " · " + (cn?.name || ""));
+      if (branded) return branded;
+    }
+    return pick(inCat, cn?.name || "");
+  }, [sales, catId, brand, cats]);
   const sizeInfo = getSizeOpts(cat);
   const catColor = cat ? getCatColor(cat, cats) : null;
 
@@ -2172,6 +2252,7 @@ function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdde
         price: price ? parseFloat(price) : null, photo_url,
       });
       setPhoto(null); setCatId(""); setSize(""); setComment(""); setPrice(""); setBrand(""); setSleeve("");
+      setBrandCleared(false);
       onSaved();
     } catch (e) {
       setErr(e.message || "Could not log the sale. Check your connection and try again.");
@@ -2209,11 +2290,20 @@ function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdde
 
       <div style={S.card}>
         <label style={S.label}>Brand</label>
-        <BrandPicker brands={brands} value={brand} onChange={setBrand} onBrandAdded={onBrandAdded} />
+        <BrandPicker brands={brands} value={brand} onBrandAdded={onBrandAdded}
+          onChange={v => { setBrand(v); if (!v) setBrandCleared(true); }} />
       </div>
 
       <div style={S.card}>
         <label style={S.label}>Category</label>
+        {topCats.length > 0 && (
+          <>
+            <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 1, marginBottom: 7 }}>MOST USED</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid " + BG }}>
+              {topCats.map(c => <button key={c.id} onClick={() => { setCatId(c.id); setSize(""); setShowAddCat(false); }} style={S.chip(catId === c.id, getCatColor(c, cats))}>{c.name}</button>)}
+            </div>
+          </>
+        )}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {cats.map(c => {
             const cc = getCatColor(c, cats);
@@ -2251,6 +2341,20 @@ function LogScreen({ cats, brands, currentUser, onSaved, onCatAdded, onBrandAdde
       <div style={S.card}>
         <label style={S.label}>Price <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: "#ccc" }}>(optional)</span></label>
         <input type="number" inputMode="numeric" value={price} onChange={e => setPrice(e.target.value)} style={S.field} />
+        {priceHints && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, letterSpacing: 1, marginBottom: 7 }}>
+              {priceHints.basis.toUpperCase()} {"\u00b7"} {priceHints.note.toUpperCase()} {"\u00b7"} {priceHints.n} SOLD
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {priceHints.list.map(([p, n]) => (
+                <button key={p} onClick={() => setPrice(String(p))} style={{ ...S.chip(String(p) === String(price), null), padding: "8px 12px", fontSize: 14 }}>
+                  {p.toLocaleString("sv-SE")} kr <span style={{ fontWeight: 400, opacity: 0.55, fontSize: 12 }}>{"\u00d7" + n}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {err && <div style={{ background: "#FDECEC", border: "1px solid #F0C0C0", color: "#A33", borderRadius: 10, padding: "10px 12px", fontSize: 13, marginBottom: 12 }}>{err}</div>}
